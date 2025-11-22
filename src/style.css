@@ -1,0 +1,40 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    body {
+        @apply bg-background text-text font-sans antialiased;
+    }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+        @apply bg-transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        @apply bg-surfaceHighlight rounded-full;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        @apply bg-secondary;
+    }
+}
+
+/* Video Player Subtitles */
+video::cue {
+    font-size: 2rem;
+    background-color: rgba(0, 0, 0, 0.5);
+    color: white;
+}
+
+video::-webkit-media-text-track-container {
+    bottom: 80px;
+}
