@@ -63,7 +63,7 @@ async function getVideoMetadata(filePath: string): Promise<VideoMetadata> {
             const videoStream = metadata.streams.find(s => s.codec_type === 'video')
 
             resolve({
-                duration: metadata.format.duration,
+                duration: typeof metadata.format.duration === 'number' ? metadata.format.duration : parseFloat(metadata.format.duration || '0'),
                 width: videoStream?.width,
                 height: videoStream?.height,
                 codec: videoStream?.codec_name,
@@ -87,7 +87,10 @@ async function generateThumbnail(videoPath: string, movieId: number, duration?: 
         }
 
         // Calculate timestamp (10% into the video, or 10 seconds if duration unknown)
-        const timestamp = duration ? duration * 0.1 : 10
+        let timestamp = 10
+        if (typeof duration === 'number' && !isNaN(duration) && duration > 0) {
+            timestamp = duration * 0.1
+        }
 
         return new Promise((resolve, _reject) => {
             ffmpeg(videoPath)
