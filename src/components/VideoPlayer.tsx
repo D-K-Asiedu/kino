@@ -403,10 +403,12 @@ export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
                     togglePlay()
                     break
                 case 'arrowleft':
-                    skip(-10)
+                    e.preventDefault()
+                    skip(e.shiftKey ? -30 : -10)
                     break
                 case 'arrowright':
-                    skip(10)
+                    e.preventDefault()
+                    skip(e.shiftKey ? 30 : 10)
                     break
                 case 'arrowup':
                     e.preventDefault()
@@ -594,8 +596,16 @@ export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
                                 <span className="font-mono bg-white/10 px-1 rounded">←</span>
                             </div>
                             <div className="flex justify-between text-xs text-white/80">
+                                <span>Rewind 30s</span>
+                                <span className="font-mono bg-white/10 px-1 rounded">Shift + ←</span>
+                            </div>
+                            <div className="flex justify-between text-xs text-white/80">
                                 <span>Forward 10s</span>
                                 <span className="font-mono bg-white/10 px-1 rounded">→</span>
+                            </div>
+                            <div className="flex justify-between text-xs text-white/80">
+                                <span>Forward 30s</span>
+                                <span className="font-mono bg-white/10 px-1 rounded">Shift + →</span>
                             </div>
                             <div className="flex justify-between text-xs text-white/80">
                                 <span>Volume Up</span>
@@ -636,7 +646,7 @@ export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
                     ref={videoRef}
                     className="w-full h-full object-contain"
                     autoPlay
-                    src={`media://${movie.file_path}`}
+                    src={`media://${encodeURIComponent(movie.file_path)}`}
                     onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
                     onLoadedMetadata={handleLoadedMetadata}
                     onPlay={() => {
