@@ -7,14 +7,36 @@ export function registerIPC() {
     ipcMain.handle('db:add-movie', (_, movie) => db.addMovie(movie))
     ipcMain.handle('db:get-watch-paths', () => db.getWatchPaths())
     ipcMain.handle('db:add-watch-path', (_, path) => db.addWatchPath(path))
-    ipcMain.handle('db:remove-watch-path', (_, id) => db.removeWatchPath(id))
+    ipcMain.handle('db:remove-watch-path', (_, id) => {
+        // Get the watch path before removing it
+        const watchPath = db.getWatchPathById(id)
+        if (watchPath) {
+            // Remove all movies from this watch path
+            db.removeMoviesByWatchPath(watchPath.path)
+            console.log(`Removed movies from watch path: ${watchPath.path}`)
+        }
+        return db.removeWatchPath(id)
+    })
     ipcMain.handle('settings:get', (_, key) => db.getSetting(key))
     ipcMain.handle('settings:set', (_, key, value) => db.setSetting(key, value))
 
     // Playlist handlers
-    ipcMain.handle('db:create-playlist', (_, name) => db.createPlaylist(name))
+    ipcMain.handle('db:create-playlist', (_, name) => {
+        // When manually creating a playlist, clear it from deleted list if it was there
+        db.clearDeletedFolderPlaylist(name)
+        return db.createPlaylist(name)
+    })
     ipcMain.handle('db:get-playlists', () => db.getPlaylists())
-    ipcMain.handle('db:delete-playlist', (_, id) => db.deletePlaylist(id))
+    ipcMain.handle('db:delete-playlist', (_, id) => {
+        // Get playlist name before deletion to track it
+        const playlist = db.getPlaylistById(id)
+        if (playlist) {
+            // Mark this folder name as deleted so it won't be auto-regenerated
+            db.markFolderPlaylistDeleted(playlist.name)
+            console.log(`Playlist "${playlist.name}" marked as deleted (won't auto-regenerate)`)
+        }
+        return db.deletePlaylist(id)
+    })
     ipcMain.handle('db:add-movie-to-playlist', (_, playlistId, movieId) => db.addMovieToPlaylist(playlistId, movieId))
     ipcMain.handle('db:remove-movie-from-playlist', (_, playlistId, movieId) => db.removeMovieFromPlaylist(playlistId, movieId))
     ipcMain.handle('db:get-playlist-movies', (_, playlistId) => db.getPlaylistMovies(playlistId))
