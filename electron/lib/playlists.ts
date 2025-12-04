@@ -17,6 +17,9 @@ export function generateDefaultPlaylists() {
     const movies = db.getMovies() as Movie[]
     const playlists = db.getPlaylists() as Playlist[]
     const playlistMap = new Map(playlists.map(p => [p.name, p.id]))
+    
+    // Get list of folder names that user has explicitly deleted
+    const deletedFolders = new Set(db.getAllDeletedFolderPlaylists())
 
     const groupedMovies = new Map<string, Movie[]>()
 
@@ -38,6 +41,12 @@ export function generateDefaultPlaylists() {
     for (const [folderName, group] of groupedMovies) {
         // Skip if folder has only 1 movie (optional, but good for noise reduction)
         if (group.length < 2) continue
+        
+        // Skip if user has explicitly deleted this folder's playlist
+        if (deletedFolders.has(folderName)) {
+            console.log(`Skipping deleted folder playlist: ${folderName}`)
+            continue
+        }
 
         let playlistId = playlistMap.get(folderName)
 

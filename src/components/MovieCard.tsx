@@ -7,6 +7,14 @@ interface MovieCardProps {
     onClick?: () => void
 }
 
+// Inline SVG placeholder for missing posters (no network dependency)
+const PLACEHOLDER_POSTER = `data:image/svg+xml,${encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect fill="#1f2937" width="640" height="360"/>
+  <text x="50%" y="50%" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="24" text-anchor="middle" dominant-baseline="middle">No Poster</text>
+</svg>
+`)}`
+
 export function MovieCard({ movie, onClick }: MovieCardProps) {
     const [showPlaylistSelector, setShowPlaylistSelector] = useState(false)
     const [playlists, setPlaylists] = useState<Playlist[]>([])
@@ -14,10 +22,12 @@ export function MovieCard({ movie, onClick }: MovieCardProps) {
     const [isCreating, setIsCreating] = useState(false)
     const [newPlaylistName, setNewPlaylistName] = useState('')
     const selectorRef = useRef<HTMLDivElement>(null)
+    const [imgError, setImgError] = useState(false)
 
-    const posterUrl = movie.poster_path
-        ? `media://${movie.poster_path}`
-        : 'https://via.placeholder.com/640x360/1f2937/9ca3af?text=No+Poster'
+    // Properly encode Windows paths for the media:// protocol
+    const posterUrl = movie.poster_path && !imgError
+        ? `media://${encodeURIComponent(movie.poster_path)}`
+        : PLACEHOLDER_POSTER
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -91,9 +101,7 @@ export function MovieCard({ movie, onClick }: MovieCardProps) {
                         alt={movie.title}
                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
                         loading="lazy"
-                        onError={(e) => {
-                            e.currentTarget.src = 'https://via.placeholder.com/640x360/1f2937/9ca3af?text=No+Poster'
-                        }}
+                        onError={() => setImgError(true)}
                     />
 
                     {/* Gradient Overlay */}
