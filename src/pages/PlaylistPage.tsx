@@ -77,6 +77,31 @@ export function PlaylistPage() {
         )
     }
 
+    const handlePlayMovie = (movie: Movie) => {
+        setSelectedMovie(movie)
+    }
+
+    const handleNext = () => {
+        if (!selectedMovie) return
+        const currentIndex = movies.findIndex(m => m.id === selectedMovie.id)
+        if (currentIndex >= 0 && currentIndex < movies.length - 1) {
+            setSelectedMovie(movies[currentIndex + 1])
+        }
+    }
+
+    const handlePrevious = () => {
+        if (!selectedMovie) return
+        const currentIndex = movies.findIndex(m => m.id === selectedMovie.id)
+        if (currentIndex > 0) {
+            setSelectedMovie(movies[currentIndex - 1])
+        }
+    }
+
+    const getCurrentIndex = () => {
+        if (!selectedMovie) return -1
+        return movies.findIndex(m => m.id === selectedMovie.id)
+    }
+
     return (
         <div className="p-8 max-w-[1920px] mx-auto">
             <header className="mb-8">
@@ -91,7 +116,7 @@ export function PlaylistPage() {
                     <div key={movie.id} className="relative group">
                         <MovieCard
                             movie={movie}
-                            onClick={() => setSelectedMovie(movie)}
+                            onClick={() => handlePlayMovie(movie)}
                         />
                         <button
                             onClick={(e) => handleRemoveFromPlaylist(e, movie.id)}
@@ -116,6 +141,10 @@ export function PlaylistPage() {
                 <VideoPlayer
                     movie={selectedMovie}
                     onClose={() => setSelectedMovie(null)}
+                    onNext={handleNext}
+                    onPrevious={handlePrevious}
+                    hasNext={getCurrentIndex() < movies.length - 1}
+                    hasPrevious={getCurrentIndex() > 0}
                 />
             )}
         </div>
