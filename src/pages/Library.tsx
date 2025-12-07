@@ -60,6 +60,31 @@ export function Library() {
         )
     }
 
+    const handlePlayMovie = (movie: Movie) => {
+        setSelectedMovie(movie)
+    }
+
+    const handleNext = () => {
+        if (!selectedMovie) return
+        const currentIndex = filteredMovies.findIndex(m => m.id === selectedMovie.id)
+        if (currentIndex >= 0 && currentIndex < filteredMovies.length - 1) {
+            setSelectedMovie(filteredMovies[currentIndex + 1])
+        }
+    }
+
+    const handlePrevious = () => {
+        if (!selectedMovie) return
+        const currentIndex = filteredMovies.findIndex(m => m.id === selectedMovie.id)
+        if (currentIndex > 0) {
+            setSelectedMovie(filteredMovies[currentIndex - 1])
+        }
+    }
+
+    const getCurrentIndex = () => {
+        if (!selectedMovie) return -1
+        return filteredMovies.findIndex(m => m.id === selectedMovie.id)
+    }
+
     return (
         <div className="p-8 max-w-[1920px] mx-auto">
             <header className="flex items-center justify-between mb-8">
@@ -94,7 +119,7 @@ export function Library() {
                         <MovieCard
                             key={movie.id}
                             movie={movie}
-                            onClick={() => setSelectedMovie(movie)}
+                            onClick={() => handlePlayMovie(movie)}
                         />
                     ))}
                 </div>
@@ -104,6 +129,10 @@ export function Library() {
                 <VideoPlayer
                     movie={selectedMovie}
                     onClose={() => setSelectedMovie(null)}
+                    onNext={handleNext}
+                    onPrevious={handlePrevious}
+                    hasNext={getCurrentIndex() < filteredMovies.length - 1}
+                    hasPrevious={getCurrentIndex() > 0}
                 />
             )}
         </div>

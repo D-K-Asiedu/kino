@@ -9,11 +9,15 @@ import { Movie, VideoElementWithTracks, AudioTrack } from '../types'
 interface VideoPlayerProps {
     movie: Movie
     onClose: () => void
+    onNext?: () => void
+    onPrevious?: () => void
+    hasNext?: boolean
+    hasPrevious?: boolean
 }
 
 type SettingsTab = 'main' | 'audio' | 'subtitles' | 'speed' | 'shortcuts'
 
-export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
+export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPrevious }: VideoPlayerProps) {
     const videoRef = useRef<HTMLVideoElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
     const controlsTimeoutRef = useRef<NodeJS.Timeout>()
@@ -43,6 +47,9 @@ export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
 
     // Time Display State
     const [showRemainingTime, setShowRemainingTime] = useState(false)
+
+    // Up Next Overlay State
+    const [showUpNext, setShowUpNext] = useState(false)
 
     // Initialize volume from localStorage
     useEffect(() => {
@@ -136,6 +143,18 @@ export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
             }
         }
     }, [movie.id])
+
+    // Show up next overlay when video is 90% complete
+    useEffect(() => {
+        if (duration > 0 && currentTime > 0) {
+            const progress = currentTime / duration
+            if (progress >= 0.9 && (hasNext || hasPrevious)) {
+                setShowUpNext(true)
+            } else {
+                setShowUpNext(false)
+            }
+        }
+    }, [currentTime, duration, hasNext, hasPrevious])
 
     // Video Actions
     const togglePlay = () => {
@@ -436,6 +455,16 @@ export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
                         onClose()
                     }
                     break
+                case 'n':
+                    if (hasNext && onNext) {
+                        onNext()
+                    }
+                    break
+                case 'p':
+                    if (hasPrevious && onPrevious) {
+                        onPrevious()
+                    }
+                    break
             }
         }
 
@@ -623,6 +652,14 @@ export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
                                 <span>Mute</span>
                                 <span className="font-mono bg-white/10 px-1 rounded">M</span>
                             </div>
+                            <div className="flex justify-between text-xs text-white/80">
+                                <span>Next Video</span>
+                                <span className="font-mono bg-white/10 px-1 rounded">N</span>
+                            </div>
+                            <div className="flex justify-between text-xs text-white/80">
+                                <span>Previous Video</span>
+                                <span className="font-mono bg-white/10 px-1 rounded">P</span>
+                            </div>
                         </div>
                     </div>
                 )
@@ -706,6 +743,34 @@ export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
             {isBuffering && (
                 <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
                     <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-primary"></div>
+                </div>
+            )}
+
+            {/* Up Next Overlay */}
+            {showUpNext && !showResumePrompt && (
+                <div className="absolute bottom-28 right-8 z-30 animate-in slide-in-from-right fade-in duration-500">
+                    <div className="max-w-sm transform transition-all animate-in zoom-in-95 slide-in-from-bottom-4 duration-500">
+                        <div className="flex flex-col gap-3 w-full">
+                            {hasNext && onNext && (
+                                <button
+                                    onClick={onNext}
+                                    className="flex items-center justify-center gap-3 px-8 py-3.5 rounded-xl bg-white text-black hover:bg-white/90 transition-all font-bold text-sm tracking-wide hover:scale-105 active:scale-95 shadow-xl shadow-white/10"
+                                >
+                                    <SkipForward className="w-4 h-4 fill-current" />
+                                    NEXT VIDEO
+                                </button>
+                            )}
+                            {hasPrevious && onPrevious && (
+                                <button
+                                    onClick={onPrevious}
+                                    className="flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 hover:text-white transition-all font-medium text-sm border border-white/5 hover:border-white/10 backdrop-blur-md"
+                                >
+                                    <SkipBack className="w-4 h-4" />
+                                    Previous Video
+                                </button>
+                            )}
+                        </div>
+                    </div>
                 </div>
             )}
 
@@ -832,6 +897,27 @@ export function VideoPlayer({ movie, onClose }: VideoPlayerProps) {
                     </div>
 
                     <div className="flex items-center gap-4 relative">
+                        {/* Next/Previous Buttons */}
+                        {hasPrevious && onPrevious && (
+                            <button
+                                onClick={onPrevious}
+                                className="text-white/70 hover:text-white transition-colors"
+                                title="Previous video (P)"
+                            >
+                                <SkipBack className="w-6 h-6" />
+                            </button>
+                        )}
+
+                        {hasNext && onNext && (
+                            <button
+                                onClick={onNext}
+                                className="text-white/70 hover:text-white transition-colors"
+                                title="Next video (N)"
+                            >
+                                <SkipForward className="w-6 h-6" />
+                            </button>
+                        )}
+
                         {/* Settings Menu */}
                         {showSettings && (
                             <div className="absolute bottom-14 right-0 bg-black/90 backdrop-blur-md border border-white/10 rounded-xl p-2 min-w-[240px] shadow-2xl z-50 animate-in fade-in slide-in-from-bottom-2 duration-200">
