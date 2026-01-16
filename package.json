@@ -2,6 +2,8 @@
   "name": "kino",
   "private": true,
   "version": "0.1.0-beta.1",
+  "description": "Kino video player",
+  "author": "Donald <donniequamz@gmail.com>",
   "type": "module",
   "scripts": {
     "dev": "vite",
