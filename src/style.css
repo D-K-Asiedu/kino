@@ -38,3 +38,41 @@ video::cue {
 video::-webkit-media-text-track-container {
     bottom: 80px;
 }
+
+@layer components {
+    .marquee-track {
+        overflow: hidden;
+        position: relative;
+    }
+
+    .marquee-track .marquee-content {
+        display: inline-block;
+        padding-right: 100%;
+        /* No animation by default so it resets when not hovered */
+        animation: none;
+        transform: translateX(0);
+        will-change: transform;
+    }
+
+    /* Start the marquee on hover/focus **only when the content overflows**; when hover ends
+       the element returns to `animation: none` and resets to its starting position. */
+    .marquee-track[data-overflow="true"]:hover .marquee-content,
+    .marquee-track[data-overflow="true"]:focus-within .marquee-content {
+        animation: marquee 12s linear infinite;
+    }
+
+    @keyframes marquee {
+        0% {
+            transform: translateX(0);
+        }
+        100% {
+            transform: translateX(calc(-100%));
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .marquee-track .marquee-content {
+            animation: none;
+        }
+    }
+}

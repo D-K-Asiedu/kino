@@ -17,6 +17,27 @@ interface VideoPlayerProps {
 
 type SettingsTab = 'main' | 'audio' | 'subtitles' | 'speed' | 'shortcuts'
 
+const STORAGE_KEYS = {
+    playbackRate: 'kino_preferred_speed',
+    subtitle: 'kino_preferred_subtitle_language',
+    audio: 'kino_preferred_audio_language'
+}
+
+const getStoredValue = (key: string) => {
+    if (typeof window === 'undefined') return null
+    return window.localStorage.getItem(key)
+}
+
+const setStoredValue = (key: string, value: string) => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(key, value)
+}
+
+const removeStoredValue = (key: string) => {
+    if (typeof window === 'undefined') return
+    window.localStorage.removeItem(key)
+}
+
 export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPrevious }: VideoPlayerProps) {
     const videoRef = useRef<HTMLVideoElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
@@ -30,7 +51,11 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const [isMuted, setIsMuted] = useState(false)
     const [isFullscreen, setIsFullscreen] = useState(false)
     const [showControls, setShowControls] = useState(true)
-    const [playbackRate, setPlaybackRate] = useState(1)
+    const [playbackRate, setPlaybackRate] = useState(() => {
+        const storedValue = getStoredValue(STORAGE_KEYS.playbackRate)
+        const parsed = storedValue ? parseFloat(storedValue) : NaN
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : 1
+    })
     const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([])
     const [textTracks, setTextTracks] = useState<TextTrack[]>([])
 
@@ -117,6 +142,37 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         }
         loadProgress()
     }, [movie.id])
+
+    useEffect(() => {
+        setCurrentTime(0)
+        setDuration(0)
+        setSavedProgress(null)
+        setShowResumePrompt(false)
+        setAudioTracks([])
+        setTextTracks([])
+        if (videoRef.current) {
+            const existingTracks = videoRef.current.querySelectorAll('track')
+            existingTracks.forEach(t => {
+                if (t.track) {
+                    t.track.mode = 'disabled'
+                }
+                t.remove()
+            })
+
+            const textTrackList = videoRef.current.textTracks
+            for (let i = 0; i < textTrackList.length; i++) {
+                textTrackList[i].mode = 'disabled'
+            }
+
+            videoRef.current.currentTime = 0
+        }
+    }, [movie.id])
+
+    useEffect(() => {
+        if (videoRef.current) {
+            videoRef.current.playbackRate = playbackRate
+        }
+    }, [movie.id, playbackRate])
 
     // Save progress periodically
     useEffect(() => {
@@ -224,6 +280,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
     const changePlaybackRate = (rate: number) => {
         setPlaybackRate(rate)
+        setStoredValue(STORAGE_KEYS.playbackRate, rate.toString())
         if (videoRef.current) {
             videoRef.current.playbackRate = rate
         }
@@ -236,6 +293,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         try {
             // Fetch metadata from backend
             const metadata = await window.ipcRenderer.invoke('media:get-metadata', movie.file_path)
+            const storedAudioLang = getStoredValue(STORAGE_KEYS.audio)
+            const storedSubtitleLang = getStoredValue(STORAGE_KEYS.subtitle)
 
             // Set Audio Tracks
             if (metadata.audioTracks && metadata.audioTracks.length > 0) {
@@ -247,6 +306,12 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                     enabled: t.index === 1 // Default to first track usually
                 }))
                 setAudioTracks(tracks)
+                if (storedAudioLang) {
+                    const index = tracks.findIndex(track => (track.language && track.language === storedAudioLang) || (track.label && track.label === storedAudioLang))
+                    if (index >= 0) {
+                        setTimeout(() => toggleAudioTrack(index), 0)
+                    }
+                }
             }
 
             // Set Subtitle Tracks
@@ -260,6 +325,12 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 }))
                 // Add to state but don't add to video yet until selected
                 setTextTracks(tracks as any)
+                if (storedSubtitleLang) {
+                    const subtitleIndex = tracks.findIndex(track => (track.language && track.language === storedSubtitleLang) || (track.label && track.label === storedSubtitleLang))
+                    if (subtitleIndex >= 0) {
+                        setTimeout(() => toggleSubtitleTrack(subtitleIndex, tracks), 100)
+                    }
+                }
             }
         } catch (err) {
             console.error('Failed to load media metadata:', err)
@@ -283,6 +354,11 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                     tracks.push(videoEl.audioTracks[i])
                 }
                 setAudioTracks(tracks)
+                const selectedTrack = videoEl.audioTracks[index]
+                const audioIdentifier = selectedTrack?.language || selectedTrack?.label
+                if (audioIdentifier) {
+                    setStoredValue(STORAGE_KEYS.audio, audioIdentifier)
+                }
             }
 
             // Force a seek to the current time to ensure the media pipeline updates
@@ -311,8 +387,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         setSettingsTab('main')
     }
 
-    const toggleSubtitleTrack = async (index: number) => {
-        const track = textTracks[index]
+    const toggleSubtitleTrack = async (index: number, trackSource?: TextTrack[]) => {
+        const trackList = trackSource ?? textTracks
+        const track = trackList[index]
         if (!track) return
 
         // If it's already showing, hide it
@@ -341,7 +418,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 videoRef.current.appendChild(trackEl)
 
                 // Update state
-                const newTracks = textTracks.map((t, i) => ({
+                const newTracks = trackList.map((t, i) => ({
                     ...t,
                     mode: i === index ? 'showing' : 'hidden'
                 }))
@@ -353,6 +430,10 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                         trackEl.track.mode = 'showing'
                     }
                 }, 100)
+            }
+            const subtitleIdentifier = track.language || track.label
+            if (subtitleIdentifier) {
+                setStoredValue(STORAGE_KEYS.subtitle, subtitleIdentifier)
             }
         } catch (err) {
             console.error('Failed to load subtitle:', err)
@@ -369,6 +450,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             const newTracks = textTracks.map(t => ({ ...t, mode: 'hidden' }))
             setTextTracks(newTracks as any)
         }
+        removeStoredValue(STORAGE_KEYS.subtitle)
         setSettingsTab('main')
     }
 

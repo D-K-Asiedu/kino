@@ -1,6 +1,37 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { WatchPath } from '../types'
 import { FolderPlus, Trash2, RefreshCw, Folder } from 'lucide-react'
+
+function PathMarquee({ text }: { text: string }) {
+    const wrapperRef = useRef<HTMLDivElement | null>(null)
+    const [overflow, setOverflow] = useState(false)
+
+    useEffect(() => {
+        const el = wrapperRef.current
+        if (!el) return
+
+        const check = () => {
+            // scrollWidth > clientWidth indicates overflow
+            setOverflow(el.scrollWidth > el.clientWidth)
+        }
+
+        check()
+        const ro = new ResizeObserver(check)
+        ro.observe(el)
+        window.addEventListener('resize', check)
+
+        return () => {
+            ro.disconnect()
+            window.removeEventListener('resize', check)
+        }
+    }, [text])
+
+    return (
+        <div ref={wrapperRef} className="marquee-track" data-overflow={overflow}>
+            <span className="marquee-content block text-sm font-mono text-text whitespace-nowrap">{text}</span>
+        </div>
+    )
+}
 
 export function Settings() {
     const [watchPaths, setWatchPaths] = useState<WatchPath[]>([])
@@ -83,13 +114,13 @@ export function Settings() {
                                     key={path.id}
                                     className="flex items-center justify-between p-4 hover:bg-surfaceHighlight/50 transition-colors"
                                 >
-                                    <div className="flex items-center gap-3 overflow-hidden">
+                                    <div className="flex items-center gap-3 overflow-hidden w-full">
                                         <div className="w-10 h-10 rounded-lg bg-surfaceHighlight flex items-center justify-center flex-shrink-0">
                                             <Folder className="w-5 h-5 text-textMuted" />
                                         </div>
-                                        <span className="text-sm font-mono text-text truncate">
-                                            {path.path}
-                                        </span>
+                                        <div className="flex-1 min-w-0">
+                                                    <PathMarquee text={path.path} />
+                                        </div>
                                     </div>
                                     <button
                                         onClick={() => handleRemovePath(path.id)}

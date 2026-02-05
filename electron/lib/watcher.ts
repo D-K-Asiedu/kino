@@ -105,13 +105,19 @@ function syncLibrary() {
         }
     })
 
+    const playlistResult = generateDefaultPlaylists()
+    const playlistUpdated = playlistResult.created > 0 || playlistResult.added > 0
+
     if (addedCount > 0 || removedCount > 0 || thumbnailGenCount > 0) {
         console.log(`Watcher: Sync complete. Removed ${removedCount}, Added ${addedCount}, Generating thumbnails for ${thumbnailGenCount}.`)
-        generateDefaultPlaylists()
         notifyRenderer('library-updated')
-        notifyRenderer('playlists-updated')
     } else {
         console.log('Watcher: Sync complete. No changes.')
+    }
+
+    if (playlistUpdated) {
+        console.log(`Watcher: Playlist sync generated ${playlistResult.created} playlists and added ${playlistResult.added} entries.`)
+        notifyRenderer('playlists-updated')
     }
 }
 
