@@ -1,7 +1,7 @@
 import {
     Play, Pause, Volume2, VolumeX, Maximize, Minimize,
     SkipBack, SkipForward, ChevronLeft, Gauge, MessageSquare, Languages,
-    History, RotateCcw, Settings, Check, Keyboard
+    History, RotateCcw, Settings, Check, Keyboard, PictureInPicture2
 } from 'lucide-react'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Movie, VideoElementWithTracks, AudioTrack } from '../types'
@@ -50,6 +50,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const [volume, setVolume] = useState(1)
     const [isMuted, setIsMuted] = useState(false)
     const [isFullscreen, setIsFullscreen] = useState(false)
+    const [isPictureInPicture, setIsPictureInPicture] = useState(false)
+    const [isPictureInPictureSupported, setIsPictureInPictureSupported] = useState(false)
     const [showControls, setShowControls] = useState(true)
     const [playbackRate, setPlaybackRate] = useState(() => {
         const storedValue = getStoredValue(STORAGE_KEYS.playbackRate)
@@ -86,6 +88,35 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             if (videoRef.current) {
                 videoRef.current.volume = vol
                 videoRef.current.muted = vol === 0
+            }
+        }
+    }, [])
+
+    // Picture-in-Picture support and state tracking
+    useEffect(() => {
+        setIsPictureInPictureSupported(!!document.pictureInPictureEnabled)
+    }, [])
+
+    useEffect(() => {
+        const video = videoRef.current
+        if (!video) return
+
+        const handleEnter = () => setIsPictureInPicture(true)
+        const handleLeave = () => setIsPictureInPicture(false)
+
+        video.addEventListener('enterpictureinpicture', handleEnter)
+        video.addEventListener('leavepictureinpicture', handleLeave)
+
+        return () => {
+            video.removeEventListener('enterpictureinpicture', handleEnter)
+            video.removeEventListener('leavepictureinpicture', handleLeave)
+        }
+    }, [])
+
+    useEffect(() => {
+        return () => {
+            if (document.pictureInPictureElement) {
+                document.exitPictureInPicture().catch(() => undefined)
             }
         }
     }, [])
@@ -277,6 +308,19 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             setIsFullscreen(false)
         }
     }
+
+    const togglePictureInPicture = useCallback(async () => {
+        if (!videoRef.current || !document.pictureInPictureEnabled) return
+        try {
+            if (document.pictureInPictureElement) {
+                await document.exitPictureInPicture()
+            } else {
+                await videoRef.current.requestPictureInPicture()
+            }
+        } catch {
+            // Ignore PiP failures (e.g., unsupported or blocked)
+        }
+    }, [])
 
     const changePlaybackRate = (rate: number) => {
         setPlaybackRate(rate)
@@ -527,6 +571,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 case 'm':
                     toggleMute()
                     break
+                case 'i':
+                    togglePictureInPicture()
+                    break
                 case 'escape':
                     if (document.fullscreenElement) {
                         document.exitFullscreen()
@@ -552,7 +599,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
         window.addEventListener('keydown', handleKeyDown)
         return () => window.removeEventListener('keydown', handleKeyDown)
-    }, [onClose, volume, showControlsHandler, showSettings])
+    }, [onClose, volume, showControlsHandler, showSettings, togglePictureInPicture])
 
     // Settings Menu Content
     const renderSettingsContent = () => {
@@ -729,6 +776,10 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                             <div className="flex justify-between text-xs text-white/80">
                                 <span>Fullscreen</span>
                                 <span className="font-mono bg-white/10 px-1 rounded">F</span>
+                            </div>
+                            <div className="flex justify-between text-xs text-white/80">
+                                <span>Picture in Picture</span>
+                                <span className="font-mono bg-white/10 px-1 rounded">I</span>
                             </div>
                             <div className="flex justify-between text-xs text-white/80">
                                 <span>Mute</span>
@@ -1006,6 +1057,16 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                         >
                             <Settings className="w-6 h-6" />
                         </button>
+
+                        {isPictureInPictureSupported && (
+                            <button
+                                onClick={togglePictureInPicture}
+                                className={`transition-colors ${isPictureInPicture ? 'text-primary' : 'text-white/70 hover:text-white'}`}
+                                title="Picture in Picture (I)"
+                            >
+                                <PictureInPicture2 className="w-6 h-6" />
+                            </button>
+                        )}
 
                         <button onClick={toggleFullscreen} className="text-white/70 hover:text-white transition-colors">
                             {isFullscreen ? <Minimize className="w-6 h-6" /> : <Maximize className="w-6 h-6" />}
