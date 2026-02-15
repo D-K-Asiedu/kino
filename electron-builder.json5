@@ -46,6 +46,7 @@
       "AppImage",
       "deb"
     ],
-    "artifactName": "${productName}-Linux-${version}.${ext}"
+    "artifactName": "${productName}-Linux-${version}.${ext}",
+    "icon": "build/icon.png"
   }
 }

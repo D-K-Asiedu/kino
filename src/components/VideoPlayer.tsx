@@ -797,17 +797,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 </div>
             </div>
 
-            {/* Center Play/Pause Animation/Button */}
-            {!isPlaying && !showResumePrompt && !isBuffering && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/20 backdrop-blur-[2px] z-10 pointer-events-none">
-                    <button
-                        onClick={togglePlay}
-                        className="p-6 bg-white/10 hover:bg-white/20 rounded-full backdrop-blur-md transition-all transform hover:scale-110 pointer-events-auto"
-                    >
-                        <Play className="w-16 h-16 text-white fill-white" />
-                    </button>
-                </div>
-            )}
+            {/* Center Play/Pause Overlay removed per UX request */}
 
             {/* Click Feedback Animation */}
             {clickFeedback && (

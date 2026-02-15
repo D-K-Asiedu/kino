@@ -68,9 +68,26 @@ app.commandLine.appendSwitch('enable-experimental-web-platform-features')
 
 let win: BrowserWindow | null
 
+function resolveIconPath() {
+  const candidates = [
+    path.join(process.env.APP_ROOT!, 'build', 'icon.png'),
+    path.join(RENDERER_DIST, 'icon.png'),
+    path.join(process.env.APP_ROOT!, 'public', 'icon.png'),
+  ]
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate
+    }
+  }
+
+  writeLog('WARN', `App icon not found. Checked: ${candidates.join(', ')}`)
+  return undefined
+}
+
 function createWindow() {
   win = new BrowserWindow({
-    icon: path.join(process.env.VITE_PUBLIC, 'electron-vite.svg'),
+    icon: resolveIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
     },
