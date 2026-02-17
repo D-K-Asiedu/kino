@@ -103,6 +103,12 @@ export function registerIPC() {
 
         return { total: movies.length, queued: movies.length }
     })
+    ipcMain.handle('thumbnails:regenerate-one', async (_, movieId: number) => {
+        if (!movieId) return { queued: 0 }
+        db.enqueueMetadataJob(movieId, true)
+        triggerMetadataProcessing()
+        return { queued: 1 }
+    })
     ipcMain.handle('media:get-metadata', async (_, filePath) => {
         const { getMediaMetadata } = await import('./ffmpeg')
         return getMediaMetadata(filePath)

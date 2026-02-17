@@ -90,7 +90,9 @@ export async function generateThumbnailToPath(
     try {
         const outputDir = path.dirname(outputPath)
         await fs.ensureDir(outputDir)
-        const tempThumbnailPath = `${outputPath}.tmp`
+        const outputExt = path.extname(outputPath)
+        const outputBase = path.basename(outputPath, outputExt)
+        const tempThumbnailPath = path.join(outputDir, `${outputBase}.tmp${outputExt}`)
 
         // If thumbnail already exists and is valid, return it
         if (!options?.force && await isThumbnailValid(outputPath)) {

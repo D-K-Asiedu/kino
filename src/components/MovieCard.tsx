@@ -23,6 +23,7 @@ export function MovieCard({ movie, onClick }: MovieCardProps) {
     const [newPlaylistName, setNewPlaylistName] = useState('')
     const selectorRef = useRef<HTMLDivElement>(null)
     const [imgError, setImgError] = useState(false)
+    const [thumbnailRegenRequested, setThumbnailRegenRequested] = useState(false)
     const [secureModalOpen, setSecureModalOpen] = useState(false)
     const [secureMode, setSecureMode] = useState<'confirm' | 'create' | 'unlock'>('unlock')
     const [securePassword, setSecurePassword] = useState('')
@@ -34,6 +35,21 @@ export function MovieCard({ movie, onClick }: MovieCardProps) {
     const posterUrl = movie.poster_path && !imgError
         ? `media://${encodeURIComponent(movie.poster_path)}`
         : PLACEHOLDER_POSTER
+
+    useEffect(() => {
+        // Reset image error when poster path changes so we can retry loading
+        setImgError(false)
+        setThumbnailRegenRequested(false)
+    }, [movie.poster_path])
+
+    useEffect(() => {
+        if (!imgError || thumbnailRegenRequested) return
+        if (!movie.poster_path) return
+        setThumbnailRegenRequested(true)
+        void window.ipcRenderer.invoke('thumbnails:regenerate-one', movie.id).catch((err: any) => {
+            console.error('Failed to queue thumbnail regeneration:', err)
+        })
+    }, [imgError, thumbnailRegenRequested, movie.id, movie.poster_path])
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
