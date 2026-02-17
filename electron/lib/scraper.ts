@@ -81,27 +81,24 @@ async function getVideoMetadata(filePath: string): Promise<VideoMetadata> {
     })
 }
 
-async function generateThumbnail(
+export async function generateThumbnailToPath(
     videoPath: string,
-    movieId: number,
+    outputPath: string,
     duration?: number,
     options?: { force?: boolean }
 ): Promise<string | null> {
     try {
-        // Create thumbnails directory if it doesn't exist
-        const thumbnailsDir = path.join(app.getPath('userData'), 'thumbnails')
-        await fs.ensureDir(thumbnailsDir)
-
-        const thumbnailPath = path.join(thumbnailsDir, `${movieId}.jpg`)
-        const tempThumbnailPath = path.join(thumbnailsDir, `${movieId}.tmp.jpg`)
+        const outputDir = path.dirname(outputPath)
+        await fs.ensureDir(outputDir)
+        const tempThumbnailPath = `${outputPath}.tmp`
 
         // If thumbnail already exists and is valid, return it
-        if (!options?.force && await isThumbnailValid(thumbnailPath)) {
-            return thumbnailPath
+        if (!options?.force && await isThumbnailValid(outputPath)) {
+            return outputPath
         }
 
         if (options?.force) {
-            await fs.remove(thumbnailPath).catch(() => null)
+            await fs.remove(outputPath).catch(() => null)
         }
 
         // Calculate timestamp (10% into the video, or 10 seconds if duration unknown)
@@ -114,27 +111,27 @@ async function generateThumbnail(
             ffmpeg(videoPath)
                 .screenshots({
                     timestamps: [timestamp],
-                    filename: `${movieId}.tmp.jpg`,
-                    folder: thumbnailsDir,
+                    filename: path.basename(tempThumbnailPath),
+                    folder: outputDir,
                     size: '640x?' // Maintain aspect ratio, width 640px
                 })
                 .on('end', () => {
                     fs.pathExists(tempThumbnailPath)
                         .then((exists) => {
                             if (!exists) return null
-                            return fs.move(tempThumbnailPath, thumbnailPath, { overwrite: true })
+                            return fs.move(tempThumbnailPath, outputPath, { overwrite: true })
                         })
                         .then(() => {
-                            console.log(`Thumbnail generated for movie ${movieId}`)
-                            resolve(thumbnailPath)
+                            console.log(`Thumbnail generated at ${outputPath}`)
+                            resolve(outputPath)
                         })
                         .catch((err) => {
-                            console.error(`Failed to finalize thumbnail for movie ${movieId}:`, err)
+                            console.error(`Failed to finalize thumbnail for ${outputPath}:`, err)
                             resolve(null)
                         })
                 })
                 .on('error', (err) => {
-                    console.error(`Failed to generate thumbnail for movie ${movieId}:`, err)
+                    console.error(`Failed to generate thumbnail for ${outputPath}:`, err)
                     fs.remove(tempThumbnailPath).catch(() => null)
                     resolve(null) // Return null instead of rejecting
                 })
@@ -143,6 +140,17 @@ async function generateThumbnail(
         console.error('Thumbnail generation error:', error)
         return null
     }
+}
+
+async function generateThumbnail(
+    videoPath: string,
+    movieId: number,
+    duration?: number,
+    options?: { force?: boolean }
+): Promise<string | null> {
+    const thumbnailsDir = path.join(app.getPath('userData'), 'thumbnails')
+    const thumbnailPath = path.join(thumbnailsDir, `${movieId}.jpg`)
+    return generateThumbnailToPath(videoPath, thumbnailPath, duration, options)
 }
 
 async function isThumbnailValid(thumbnailPath: string): Promise<boolean> {

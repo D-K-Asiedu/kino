@@ -21,6 +21,7 @@ export function SecureFolder() {
     const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null)
     const [activeTempPath, setActiveTempPath] = useState<string | null>(null)
     const activeTempPathRef = useRef<string | null>(null)
+    const [thumbs, setThumbs] = useState<Record<number, string>>({})
 
     const refreshStatus = async () => {
         const status = await window.ipcRenderer.invoke('secure:status')
@@ -50,6 +51,7 @@ export function SecureFolder() {
             fetchItems()
         } else {
             setItems([])
+            setThumbs({})
         }
     }, [isUnlocked])
 
@@ -107,6 +109,7 @@ export function SecureFolder() {
             setActiveTempPath(null)
         }
         await refreshStatus()
+        setThumbs({})
     }
 
     const handleReset = async () => {
@@ -122,6 +125,7 @@ export function SecureFolder() {
             setActiveTempPath(null)
         }
         await refreshStatus()
+        setThumbs({})
     }
 
     const handlePlay = async (item: SecureItem) => {
@@ -162,6 +166,19 @@ export function SecureFolder() {
         if (!isUnlocked) return 'Unlock to access your secure library.'
         return 'Only visible while unlocked. Files stay encrypted on disk.'
     }, [hasPassword, isUnlocked])
+
+    const requestThumbnail = async (itemId: number) => {
+        if (!isUnlocked) return null
+        try {
+            const result = await window.ipcRenderer.invoke('secure:get-thumbnail', itemId)
+            const path = result?.path as string | undefined
+            if (!path) return null
+            setThumbs((prev) => prev[itemId] ? prev : { ...prev, [itemId]: path })
+            return path
+        } catch {
+            return null
+        }
+    }
 
     if (loading) {
         return (
@@ -280,53 +297,27 @@ export function SecureFolder() {
                     ) : (
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
                             {items.map((item) => {
-                                const posterUrl = item.poster_path
-                                    ? `media://${encodeURIComponent(item.poster_path)}`
+                                const posterPath = thumbs[item.id]
+                                const posterUrl = posterPath
+                                    ? `media://${encodeURIComponent(posterPath)}`
                                     : PLACEHOLDER_POSTER
 
                                 return (
-                                    <div
+                                    <SecureItemCard
                                         key={item.id}
-                                        className="group relative"
-                                    >
-                                        <div className="relative aspect-video rounded-xl overflow-hidden bg-surfaceHighlight shadow-lg transition-all duration-300 group-hover:shadow-2xl group-hover:shadow-primary/10 group-hover:scale-[1.02]">
-                                            <img
-                                                src={posterUrl}
-                                                alt={item.title}
-                                                className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                                                loading="lazy"
-                                            />
-                                            <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-end p-4">
-                                                <div className="w-full flex items-center justify-between">
-                                                    <button
-                                                        onClick={() => handlePlay(item)}
-                                                        className="p-2 bg-white/10 hover:bg-primary text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
-                                                        title="Play"
-                                                    >
-                                                        <Play className="w-4 h-4 fill-current" />
-                                                    </button>
-                                                    <button
-                                                        onClick={() => handleDelete(item)}
-                                                        className="p-2 bg-white/10 hover:bg-red-500 text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
-                                                        title="Delete"
-                                                    >
-                                                        <Trash2 className="w-4 h-4" />
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="mt-3">
-                                            <h3 className="font-medium text-text text-base line-clamp-2">{item.title}</h3>
-                                            <p className="text-textMuted text-xs mt-0.5">{item.year ?? ''}</p>
-                                        </div>
-                                    </div>
+                                        item={item}
+                                        posterUrl={posterUrl}
+                                        onPlay={handlePlay}
+                                        onDelete={handleDelete}
+                                        requestThumbnail={requestThumbnail}
+                                        isUnlocked={isUnlocked}
+                                    />
                                 )
                             })}
                         </div>
                     )}
                 </>
             )}
-
             {selectedMovie && (
                 <VideoPlayer
                     movie={selectedMovie}
@@ -340,6 +331,95 @@ export function SecureFolder() {
                     }}
                 />
             )}
+        </div>
+    )
+}
+
+function SecureItemCard({
+    item,
+    posterUrl,
+    onPlay,
+    onDelete,
+    requestThumbnail,
+    isUnlocked,
+}: {
+    item: SecureItem
+    posterUrl: string
+    onPlay: (item: SecureItem) => void
+    onDelete: (item: SecureItem) => void
+    requestThumbnail: (itemId: number) => Promise<string | null>
+    isUnlocked: boolean
+}) {
+    const [requested, setRequested] = useState(false)
+    const [loadingThumb, setLoadingThumb] = useState(false)
+    const ref = useRef<HTMLDivElement | null>(null)
+
+    useEffect(() => {
+        if (!isUnlocked || requested) return
+        const node = ref.current
+        if (!node) return
+
+        const observer = new IntersectionObserver(
+            (entries) => {
+                for (const entry of entries) {
+                    if (entry.isIntersecting) {
+                        setRequested(true)
+                        setLoadingThumb(true)
+                        void requestThumbnail(item.id)
+                        observer.disconnect()
+                        return
+                    }
+                }
+            },
+            { rootMargin: '200px' }
+        )
+
+        observer.observe(node)
+        return () => observer.disconnect()
+    }, [isUnlocked, requested, requestThumbnail, item.id])
+
+    return (
+        <div
+            ref={ref}
+            className="group relative"
+        >
+            <div className="relative aspect-video rounded-xl overflow-hidden bg-surfaceHighlight shadow-lg transition-all duration-300 group-hover:shadow-2xl group-hover:shadow-primary/10 group-hover:scale-[1.02]">
+                {loadingThumb && (
+                    <div className="absolute inset-0 z-10 bg-black/20 overflow-hidden">
+                        <div className="absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+                    </div>
+                )}
+                <img
+                    src={posterUrl}
+                    alt={item.title}
+                    className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+                    loading="lazy"
+                    onLoad={() => setLoadingThumb(false)}
+                    onError={() => setLoadingThumb(false)}
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-end p-4">
+                    <div className="w-full flex items-center justify-between">
+                        <button
+                            onClick={() => onPlay(item)}
+                            className="p-2 bg-white/10 hover:bg-primary text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
+                            title="Play"
+                        >
+                            <Play className="w-4 h-4 fill-current" />
+                        </button>
+                        <button
+                            onClick={() => onDelete(item)}
+                            className="p-2 bg-white/10 hover:bg-red-500 text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
+                            title="Delete"
+                        >
+                            <Trash2 className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div className="mt-3">
+                <h3 className="font-medium text-text text-base line-clamp-2">{item.title}</h3>
+                <p className="text-textMuted text-xs mt-0.5">{item.year ?? ''}</p>
+            </div>
         </div>
     )
 }

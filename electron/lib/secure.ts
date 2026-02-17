@@ -4,6 +4,7 @@ import crypto from 'crypto'
 import { app } from 'electron'
 import { pipeline } from 'stream/promises'
 import * as db from './database'
+import { generateThumbnailToPath } from './scraper'
 
 const VAULT_DIR = () => path.join(app.getPath('userData'), 'secure-vault')
 const CACHE_DIR = () => path.join(app.getPath('temp'), 'kino-secure-cache')
@@ -58,6 +59,7 @@ function ensureVaultDirs() {
   fs.ensureDirSync(VAULT_DIR())
   fs.ensureDirSync(CACHE_DIR())
 }
+
 
 async function encryptFile(sourcePath: string, destPath: string, key: Buffer) {
   ensureVaultDirs()
@@ -180,6 +182,7 @@ export async function lockSecure() {
     }
   }
   cachePaths.clear()
+  thumbnailCache.clear()
   logSecure('Locked and cache cleared')
 }
 
@@ -196,7 +199,8 @@ export async function resetSecure() {
 
 export function listSecureItems() {
   requireUnlocked()
-  return db.getSecureItems()
+  const items = db.getSecureItems() as any[]
+  return items.map(item => ({ ...item, poster_path: null }))
 }
 
 export async function importMovieToSecure(movie: any) {
@@ -216,12 +220,14 @@ export async function importMovieToSecure(movie: any) {
     logSecure(`Encrypting file: ${sourcePath}`)
     await encryptFile(sourcePath, encryptedPath, unlockedKey)
 
+    await deleteLibraryThumbnail(movie)
+
     db.addSecureItem({
       title: movie.title,
       original_title: movie.original_title,
       year: movie.year,
       plot: movie.plot,
-      poster_path: movie.poster_path,
+      poster_path: null,
       backdrop_path: movie.backdrop_path,
       rating: movie.rating,
       original_name: originalName,
@@ -287,4 +293,74 @@ export async function deleteSecureItem(itemId: number) {
 
   await fs.promises.unlink(item.encrypted_path).catch(() => undefined)
   db.deleteSecureItem(itemId)
+  await deleteCachedThumbnail(itemId)
+}
+
+const thumbnailCache = new Map<number, string>()
+
+export async function getSecureThumbnail(itemId: number) {
+  requireUnlocked()
+  if (!unlockedKey) throw new Error('Secure folder is locked')
+
+  const cached = thumbnailCache.get(itemId)
+  if (cached && await existsNonEmpty(cached)) {
+    return cached
+  }
+
+  const item = db.getSecureItemById(itemId)
+  if (!item) throw new Error('Secure item not found')
+
+  const ext = path.extname(item.original_name || '') || '.mp4'
+  const tempVideoName = `${item.id}-${Date.now()}-${Math.random().toString(16).slice(2)}${ext}`
+  const tempVideoPath = path.join(CACHE_DIR(), tempVideoName)
+  const thumbnailPath = path.join(CACHE_DIR(), `thumb-${item.id}.jpg`)
+
+  await decryptFile(item.encrypted_path, tempVideoPath, unlockedKey)
+  cachePaths.add(tempVideoPath)
+
+  try {
+    const posterPath = await generateThumbnailToPath(tempVideoPath, thumbnailPath, undefined, { force: true })
+    if (!posterPath) {
+      throw new Error('Thumbnail generation failed')
+    }
+    cachePaths.add(thumbnailPath)
+    thumbnailCache.set(itemId, posterPath)
+    return posterPath
+  } finally {
+    cachePaths.delete(tempVideoPath)
+    await fs.remove(tempVideoPath).catch(() => undefined)
+  }
+}
+
+async function deleteCachedThumbnail(itemId: number | bigint) {
+  const cached = thumbnailCache.get(Number(itemId))
+  if (cached) {
+    thumbnailCache.delete(Number(itemId))
+    await fs.remove(cached).catch(() => undefined)
+  }
+}
+
+async function existsNonEmpty(filePath: string) {
+  try {
+    const stat = await fs.stat(filePath)
+    return stat.size > 0
+  } catch {
+    return false
+  }
+}
+
+async function deleteLibraryThumbnail(movie: any) {
+  try {
+    if (movie?.poster_path) {
+      await fs.remove(movie.poster_path)
+      return
+    }
+    if (movie?.id) {
+      const thumbnailsDir = path.join(app.getPath('userData'), 'thumbnails')
+      const thumbnailPath = path.join(thumbnailsDir, `${movie.id}.jpg`)
+      await fs.remove(thumbnailPath)
+    }
+  } catch (err) {
+    logSecure('Failed to delete library thumbnail during secure import', err)
+  }
 }

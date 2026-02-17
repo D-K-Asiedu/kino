@@ -14,7 +14,8 @@ import {
     importMovieWithPassword,
     prepareSecurePlayback,
     releaseSecurePlayback,
-    deleteSecureItem
+    deleteSecureItem,
+    getSecureThumbnail
 } from './secure'
 import { BrowserWindow } from 'electron'
 
@@ -168,6 +169,10 @@ export function registerIPC() {
     ipcMain.handle('secure:delete-item', async (_, itemId: number) => {
         await deleteSecureItem(itemId)
         return { ok: true }
+    })
+    ipcMain.handle('secure:get-thumbnail', async (_, itemId: number) => {
+        const path = await getSecureThumbnail(itemId)
+        return { path }
     })
 }
 
