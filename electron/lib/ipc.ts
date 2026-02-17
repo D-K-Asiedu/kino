@@ -1,6 +1,8 @@
-import { ipcMain, dialog } from 'electron'
+import { ipcMain, dialog, app } from 'electron'
+import path from 'path'
+import fs from 'fs-extra'
 import * as db from './database'
-import { updateWatcher } from './watcher'
+import { updateWatcher, triggerMetadataProcessing } from './watcher'
 import {
     getSecureStatus,
     setSecurePassword,
@@ -31,7 +33,13 @@ export function registerIPC() {
         const watchPath = db.getWatchPathById(id)
         if (watchPath) {
             // Remove all movies from this watch path
+            const movies = db.getMoviesByWatchPath(watchPath.path)
             db.removeMoviesByWatchPath(watchPath.path)
+            for (const movie of movies) {
+                if ((movie as any).id) {
+                    void deleteThumbnailForMovie((movie as any).id)
+                }
+            }
             console.log(`Removed movies from watch path: ${watchPath.path}`)
         }
         return db.removeWatchPath(id)
@@ -81,26 +89,18 @@ export function registerIPC() {
     })
 
     ipcMain.handle('thumbnails:regenerate', async () => {
-        const { fetchMetadata } = await import('./scraper')
         const movies = db.getMovies()
+        console.log(`Queueing thumbnail regeneration for ${movies.length} movies...`)
 
-        console.log(`Regenerating thumbnails for ${movies.length} movies...`)
-
-        let successCount = 0
         for (const movie of movies) {
-            try {
-                const enriched = await fetchMetadata(movie as any)
-                if (enriched && enriched.poster_path) {
-                    db.updateMovie((movie as any).id, enriched)
-                    successCount++
-                }
-            } catch (err) {
-                console.error(`Failed to generate thumbnail for ${(movie as any).title}:`, err)
+            if ((movie as any).id) {
+                db.enqueueMetadataJob((movie as any).id, true)
             }
         }
 
-        console.log(`Generated ${successCount} thumbnails`)
-        return { total: movies.length, success: successCount }
+        triggerMetadataProcessing()
+
+        return { total: movies.length, queued: movies.length }
     })
     ipcMain.handle('media:get-metadata', async (_, filePath) => {
         const { getMediaMetadata } = await import('./ffmpeg')
@@ -169,4 +169,14 @@ export function registerIPC() {
         await deleteSecureItem(itemId)
         return { ok: true }
     })
+}
+
+async function deleteThumbnailForMovie(movieId: number | bigint) {
+    try {
+        const thumbnailsDir = path.join(app.getPath('userData'), 'thumbnails')
+        const thumbnailPath = path.join(thumbnailsDir, `${movieId}.jpg`)
+        await fs.remove(thumbnailPath)
+    } catch (err) {
+        console.error('Failed to delete thumbnail for movie', movieId, err)
+    }
 }

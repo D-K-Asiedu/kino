@@ -27,6 +27,8 @@ export function initDB() {
       backdrop_path TEXT,
       rating REAL,
       file_path TEXT UNIQUE NOT NULL,
+      file_mtime INTEGER,
+      file_size INTEGER,
       added_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -79,7 +81,32 @@ export function initDB() {
       encrypted_path TEXT UNIQUE NOT NULL,
       added_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS metadata_jobs (
+      movie_id INTEGER PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      force INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (movie_id) REFERENCES movies(id) ON DELETE CASCADE
+    );
   `)
+
+  ensureMovieColumns()
+}
+
+function ensureMovieColumns() {
+  const columns = getDB().prepare('PRAGMA table_info(movies)').all() as { name: string }[]
+  const names = new Set(columns.map(col => col.name))
+
+  if (!names.has('file_mtime')) {
+    getDB().exec('ALTER TABLE movies ADD COLUMN file_mtime INTEGER')
+  }
+  if (!names.has('file_size')) {
+    getDB().exec('ALTER TABLE movies ADD COLUMN file_size INTEGER')
+  }
 }
 
 export function getMovies() {
@@ -93,8 +120,8 @@ export function movieExists(filePath: string): boolean {
 
 export function addMovie(movie: any) {
   const stmt = getDB().prepare(`
-    INSERT OR IGNORE INTO movies (title, original_title, year, plot, poster_path, backdrop_path, rating, file_path)
-    VALUES (@title, @original_title, @year, @plot, @poster_path, @backdrop_path, @rating, @file_path)
+    INSERT OR IGNORE INTO movies (title, original_title, year, plot, poster_path, backdrop_path, rating, file_path, file_mtime, file_size)
+    VALUES (@title, @original_title, @year, @plot, @poster_path, @backdrop_path, @rating, @file_path, @file_mtime, @file_size)
   `)
   return stmt.run(movie)
 }
@@ -136,10 +163,29 @@ export function updateMovie(id: number | bigint, movie: any) {
         plot = @plot,
         poster_path = @poster_path,
         backdrop_path = @backdrop_path,
-        rating = @rating
+        rating = @rating,
+        file_mtime = @file_mtime,
+        file_size = @file_size
     WHERE id = @id
   `)
   return stmt.run({ ...movie, id })
+}
+
+export function getMovieById(id: number | bigint) {
+  return getDB().prepare('SELECT * FROM movies WHERE id = ?').get(id) as any | undefined
+}
+
+export function getMovieByPath(filePath: string) {
+  return getDB().prepare('SELECT * FROM movies WHERE file_path = ?').get(filePath) as any | undefined
+}
+
+export function getMoviesByWatchPath(watchPath: string) {
+  const normalizedPath = watchPath.endsWith(path.sep) ? watchPath : watchPath + path.sep
+  return getDB().prepare(`
+    SELECT * FROM movies
+    WHERE file_path LIKE ? ESCAPE '\\'
+       OR file_path = ?
+  `).all(`${normalizedPath.replace(/[%_]/g, '\\$&')}%`, watchPath)
 }
 
 export function removeMovieByPath(filePath: string) {
@@ -163,6 +209,62 @@ export function removeMoviesByWatchPath(watchPath: string) {
   
   console.log('Database: Removed', result.changes, 'movies from watch path')
   return result
+}
+
+export function enqueueMetadataJob(movieId: number | bigint, force = false) {
+  const stmt = getDB().prepare(`
+    INSERT INTO metadata_jobs (movie_id, status, attempts, force, updated_at)
+    VALUES (?, 'pending', 0, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(movie_id) DO UPDATE SET
+      status = 'pending',
+      attempts = 0,
+      force = excluded.force,
+      updated_at = CURRENT_TIMESTAMP
+  `)
+  return stmt.run(movieId, force ? 1 : 0)
+}
+
+export function claimNextMetadataJob() {
+  const claim = getDB().transaction(() => {
+    const job = getDB().prepare(`
+      SELECT * FROM metadata_jobs
+      WHERE status = 'pending'
+      ORDER BY updated_at ASC
+      LIMIT 1
+    `).get() as any | undefined
+
+    if (!job) return undefined
+
+    getDB().prepare(`
+      UPDATE metadata_jobs
+      SET status = 'running', attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE movie_id = ?
+    `).run(job.movie_id)
+
+    return job
+  })
+
+  return claim()
+}
+
+export function completeMetadataJob(movieId: number | bigint) {
+  return getDB().prepare('DELETE FROM metadata_jobs WHERE movie_id = ?').run(movieId)
+}
+
+export function failMetadataJob(movieId: number | bigint, error: string) {
+  return getDB().prepare(`
+    UPDATE metadata_jobs
+    SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE movie_id = ?
+  `).run(error, movieId)
+}
+
+export function resetRunningMetadataJobs() {
+  return getDB().prepare(`
+    UPDATE metadata_jobs
+    SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'running'
+  `).run()
 }
 
 export function getWatchPathById(id: number) {

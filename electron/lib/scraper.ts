@@ -26,13 +26,19 @@ interface VideoMetadata {
     size?: number
 }
 
-export async function fetchMetadata(movie: any): Promise<any> {
+export async function fetchMetadata(movie: any, options?: { forceThumbnail?: boolean }): Promise<any> {
     try {
+        const fileStats = await getFileStats(movie.file_path)
         // Extract video file metadata using ffprobe
         const videoMeta = await getVideoMetadata(movie.file_path)
 
         // Generate thumbnail from video
-        const thumbnailPath = await generateThumbnail(movie.file_path, movie.id, videoMeta.duration)
+        const thumbnailPath = await generateThumbnail(
+            movie.file_path,
+            movie.id,
+            videoMeta.duration,
+            { force: options?.forceThumbnail }
+        )
 
         return {
             ...movie,
@@ -44,6 +50,8 @@ export async function fetchMetadata(movie: any): Promise<any> {
             poster_path: thumbnailPath, // Path to generated thumbnail
             backdrop_path: null,
             rating: null,
+            file_mtime: fileStats?.mtimeMs ?? movie.file_mtime ?? null,
+            file_size: fileStats?.size ?? movie.file_size ?? null,
         }
     } catch (error) {
         console.error('Error extracting metadata:', error)
@@ -73,17 +81,27 @@ async function getVideoMetadata(filePath: string): Promise<VideoMetadata> {
     })
 }
 
-async function generateThumbnail(videoPath: string, movieId: number, duration?: number): Promise<string | null> {
+async function generateThumbnail(
+    videoPath: string,
+    movieId: number,
+    duration?: number,
+    options?: { force?: boolean }
+): Promise<string | null> {
     try {
         // Create thumbnails directory if it doesn't exist
         const thumbnailsDir = path.join(app.getPath('userData'), 'thumbnails')
         await fs.ensureDir(thumbnailsDir)
 
         const thumbnailPath = path.join(thumbnailsDir, `${movieId}.jpg`)
+        const tempThumbnailPath = path.join(thumbnailsDir, `${movieId}.tmp.jpg`)
 
-        // If thumbnail already exists, return it
-        if (await fs.pathExists(thumbnailPath)) {
+        // If thumbnail already exists and is valid, return it
+        if (!options?.force && await isThumbnailValid(thumbnailPath)) {
             return thumbnailPath
+        }
+
+        if (options?.force) {
+            await fs.remove(thumbnailPath).catch(() => null)
         }
 
         // Calculate timestamp (10% into the video, or 10 seconds if duration unknown)
@@ -96,21 +114,52 @@ async function generateThumbnail(videoPath: string, movieId: number, duration?: 
             ffmpeg(videoPath)
                 .screenshots({
                     timestamps: [timestamp],
-                    filename: `${movieId}.jpg`,
+                    filename: `${movieId}.tmp.jpg`,
                     folder: thumbnailsDir,
                     size: '640x?' // Maintain aspect ratio, width 640px
                 })
                 .on('end', () => {
-                    console.log(`Thumbnail generated for movie ${movieId}`)
-                    resolve(thumbnailPath)
+                    fs.pathExists(tempThumbnailPath)
+                        .then((exists) => {
+                            if (!exists) return null
+                            return fs.move(tempThumbnailPath, thumbnailPath, { overwrite: true })
+                        })
+                        .then(() => {
+                            console.log(`Thumbnail generated for movie ${movieId}`)
+                            resolve(thumbnailPath)
+                        })
+                        .catch((err) => {
+                            console.error(`Failed to finalize thumbnail for movie ${movieId}:`, err)
+                            resolve(null)
+                        })
                 })
                 .on('error', (err) => {
                     console.error(`Failed to generate thumbnail for movie ${movieId}:`, err)
+                    fs.remove(tempThumbnailPath).catch(() => null)
                     resolve(null) // Return null instead of rejecting
                 })
         })
     } catch (error) {
         console.error('Thumbnail generation error:', error)
+        return null
+    }
+}
+
+async function isThumbnailValid(thumbnailPath: string): Promise<boolean> {
+    try {
+        const stat = await fs.stat(thumbnailPath)
+        return stat.size > 0
+    } catch {
+        return false
+    }
+}
+
+async function getFileStats(filePath: string): Promise<{ mtimeMs: number; size: number } | null> {
+    try {
+        const stat = await fs.stat(filePath)
+        return { mtimeMs: stat.mtimeMs, size: stat.size }
+    } catch (err) {
+        console.error('Failed to stat file:', filePath, err)
         return null
     }
 }

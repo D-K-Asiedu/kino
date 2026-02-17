@@ -2,14 +2,13 @@ import { watch, FSWatcher } from 'chokidar'
 import path from 'path'
 import fs from 'fs-extra'
 import * as db from './database'
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, app } from 'electron'
 import { fetchMetadata } from './scraper'
 import { generateDefaultPlaylists } from './playlists'
 
 let watcher: FSWatcher | null = null
 
 const MAX_METADATA_CONCURRENCY = 2
-const metadataQueue: Array<{ movie: any; id: number | bigint }> = []
 let metadataWorkers = 0
 let libraryUpdateTimer: NodeJS.Timeout | null = null
 let suppressLibraryUpdates = false
@@ -44,6 +43,9 @@ export function startWatcher() {
         .on('unlink', (filePath) => {
             handleFileRemove(filePath)
         })
+
+    db.resetRunningMetadataJobs()
+    void processMetadataQueue()
 
     void syncLibrary()
 }
@@ -101,13 +103,20 @@ async function syncLibrary() {
     // 3. Check for missing thumbnails
     let thumbnailGenCount = 0
     movies.forEach((movie: any) => {
-        const hasThumbnail = movie.poster_path && fs.existsSync(movie.poster_path)
+        if (!fs.existsSync(movie.file_path)) return
+
+        const stats = getFileStatSnapshot(movie.file_path)
+        const fingerprintChanged = stats
+            ? movie.file_mtime !== stats.mtimeMs || movie.file_size !== stats.size
+            : false
+
+        const hasThumbnail = movie.poster_path && fs.existsSync(movie.poster_path) && isNonEmptyFile(movie.poster_path)
         const isInvalidThumbnail = movie.poster_path && movie.poster_path.endsWith('undefined.jpg')
 
-        if (!hasThumbnail || isInvalidThumbnail) {
-            console.log('Watcher: Missing or invalid thumbnail for:', movie.title, 'ID:', movie.id)
+        if (!hasThumbnail || isInvalidThumbnail || fingerprintChanged) {
+            console.log('Watcher: Thumbnail refresh needed for:', movie.title, 'ID:', movie.id)
             thumbnailGenCount++
-            enqueueMetadata(movie, movie.id)
+            enqueueMetadataJob(movie.id, fingerprintChanged)
         }
     })
 
@@ -131,6 +140,10 @@ export function updateWatcher() {
     startWatcher()
 }
 
+export function triggerMetadataProcessing() {
+    void processMetadataQueue()
+}
+
 function handleFileAdd(filePath: string) {
     console.log('Watcher: File add event detected for:', filePath)
     // Check if already exists
@@ -142,6 +155,7 @@ function handleFileAdd(filePath: string) {
     const filename = path.basename(filePath)
     const parsed = parseFilename(filename)
 
+    const stats = getFileStatSnapshot(filePath)
     const movie = {
         title: parsed.title,
         original_title: parsed.title, // Placeholder
@@ -150,7 +164,9 @@ function handleFileAdd(filePath: string) {
         poster_path: '',
         backdrop_path: '',
         rating: 0,
-        file_path: filePath
+        file_path: filePath,
+        file_mtime: stats?.mtimeMs ?? null,
+        file_size: stats?.size ?? null,
     }
 
     try {
@@ -158,8 +174,7 @@ function handleFileAdd(filePath: string) {
         scheduleLibraryUpdate()
 
         // Fetch metadata in background
-        const movieWithId = { ...movie, id: info.lastInsertRowid }
-        enqueueMetadata(movieWithId, info.lastInsertRowid)
+        enqueueMetadataJob(info.lastInsertRowid)
 
         // Auto-generate playlists
         generateDefaultPlaylists()
@@ -173,8 +188,12 @@ function handleFileAdd(filePath: string) {
 function handleFileRemove(filePath: string) {
     console.log('Watcher: File remove event detected for:', filePath)
     try {
+        const movie = db.getMovieByPath(filePath)
         const result = db.removeMovieByPath(filePath)
         console.log('Watcher: Database removal result:', result)
+        if (movie?.id) {
+            void deleteThumbnailForMovie(movie.id)
+        }
 
         // Cleanup empty playlists
         db.deleteEmptyPlaylists()
@@ -225,32 +244,70 @@ function scheduleLibraryUpdate() {
     }, 250)
 }
 
-function enqueueMetadata(movie: any, id: number | bigint) {
-    metadataQueue.push({ movie, id })
+function enqueueMetadataJob(id: number | bigint, force = false) {
+    db.enqueueMetadataJob(id, force)
     void processMetadataQueue()
 }
 
 async function processMetadataQueue() {
-    while (metadataWorkers < MAX_METADATA_CONCURRENCY && metadataQueue.length > 0) {
-        const job = metadataQueue.shift()
+    while (metadataWorkers < MAX_METADATA_CONCURRENCY) {
+        const job = db.claimNextMetadataJob()
         if (!job) return
 
+        const movie = db.getMovieById(job.movie_id)
+        if (!movie) {
+            db.completeMetadataJob(job.movie_id)
+            continue
+        }
+
         metadataWorkers++
-        fetchMetadata(job.movie)
+        fetchMetadata(movie, { forceThumbnail: !!job.force })
             .then((enriched: any) => {
                 if (enriched) {
-                    db.updateMovie(job.id, enriched)
+                    db.updateMovie(movie.id, enriched)
                     metadataUpdatePending = true
                 }
+                db.completeMetadataJob(movie.id)
             })
-            .catch((err: any) => console.error('Metadata fetch failed:', err))
+            .catch((err: any) => {
+                console.error('Metadata fetch failed:', err)
+                db.failMetadataJob(movie.id, String(err?.message || err))
+            })
             .finally(() => {
                 metadataWorkers--
-                if (metadataWorkers === 0 && metadataQueue.length === 0 && metadataUpdatePending) {
+                if (metadataWorkers === 0 && metadataUpdatePending) {
                     metadataUpdatePending = false
                     scheduleLibraryUpdate()
                 }
                 void processMetadataQueue()
             })
+    }
+}
+
+function getFileStatSnapshot(filePath: string): { mtimeMs: number; size: number } | null {
+    try {
+        const stat = fs.statSync(filePath)
+        return { mtimeMs: stat.mtimeMs, size: stat.size }
+    } catch {
+        return null
+    }
+}
+
+function isNonEmptyFile(filePath: string): boolean {
+    try {
+        const stat = fs.statSync(filePath)
+        return stat.size > 0
+    } catch {
+        return false
+    }
+}
+
+async function deleteThumbnailForMovie(movieId: number | bigint) {
+    try {
+        const thumbnailsDir = path.join(app.getPath('userData'), 'thumbnails')
+        const thumbnailPath = path.join(thumbnailsDir, `${movieId}.jpg`)
+        await fs.remove(thumbnailPath)
+    } catch (err) {
+        console.error('Failed to delete thumbnail for movie', movieId, err)
     }
 }

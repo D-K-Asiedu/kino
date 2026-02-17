@@ -148,7 +148,7 @@ export function Settings() {
                         <div>
                             <h2 className="text-xl font-semibold text-white">Thumbnails</h2>
                             <p className="text-textMuted text-sm mt-1">
-                                Regenerate thumbnails for all movies in your library. This may take a while.
+                                Queue thumbnail regeneration for all movies in your library. This runs in the background.
                             </p>
                         </div>
                         <button
@@ -157,7 +157,7 @@ export function Settings() {
                                 try {
                                     setRegenerating(true)
                                     const result = await window.ipcRenderer.invoke('thumbnails:regenerate')
-                                    alert(`Generated ${result.success} / ${result.total} thumbnails`)
+                                    alert(`Queued ${result.queued} / ${result.total} thumbnails`)
                                     fetchWatchPaths() // Trigger refresh
                                 } catch (err) {
                                     console.error('Error regenerating thumbnails:', err)
