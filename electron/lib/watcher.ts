@@ -8,6 +8,14 @@ import { generateDefaultPlaylists } from './playlists'
 
 let watcher: FSWatcher | null = null
 
+const MAX_METADATA_CONCURRENCY = 2
+const metadataQueue: Array<{ movie: any; id: number | bigint }> = []
+let metadataWorkers = 0
+let libraryUpdateTimer: NodeJS.Timeout | null = null
+let suppressLibraryUpdates = false
+let pendingLibraryUpdate = false
+let metadataUpdatePending = false
+
 const VIDEO_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv']
 
 export function startWatcher() {
@@ -37,10 +45,10 @@ export function startWatcher() {
             handleFileRemove(filePath)
         })
 
-    syncLibrary()
+    void syncLibrary()
 }
 
-function syncLibrary() {
+async function syncLibrary() {
     console.log('Watcher: Syncing library...')
     const movies = db.getMovies()
     const watchPaths = db.getWatchPaths().map((row: any) => row.path)
@@ -57,19 +65,18 @@ function syncLibrary() {
 
     // 2. Check for new files
     let addedCount = 0
-    const scanDirectory = (dir: string) => {
+    const scanDirectory = async (dir: string) => {
         try {
             if (!fs.existsSync(dir)) return
 
-            const files = fs.readdirSync(dir)
-            for (const file of files) {
-                const fullPath = path.join(dir, file)
-                const stat = fs.statSync(fullPath)
+            const entries = await fs.readdir(dir, { withFileTypes: true })
+            for (const entry of entries) {
+                const fullPath = path.join(dir, entry.name)
 
-                if (stat.isDirectory()) {
+                if (entry.isDirectory()) {
                     // Simple recursion limit check could be added here if needed
-                    scanDirectory(fullPath)
-                } else {
+                    await scanDirectory(fullPath)
+                } else if (entry.isFile()) {
                     const ext = path.extname(fullPath).toLowerCase()
                     if (VIDEO_EXTENSIONS.includes(ext)) {
                         if (!db.movieExists(fullPath)) {
@@ -85,7 +92,11 @@ function syncLibrary() {
         }
     }
 
-    watchPaths.forEach(p => scanDirectory(p))
+    suppressLibraryUpdates = true
+    for (const p of watchPaths) {
+        await scanDirectory(p)
+    }
+    suppressLibraryUpdates = false
 
     // 3. Check for missing thumbnails
     let thumbnailGenCount = 0
@@ -96,12 +107,7 @@ function syncLibrary() {
         if (!hasThumbnail || isInvalidThumbnail) {
             console.log('Watcher: Missing or invalid thumbnail for:', movie.title, 'ID:', movie.id)
             thumbnailGenCount++
-            fetchMetadata(movie).then((enriched: any) => {
-                if (enriched && enriched.poster_path) {
-                    db.updateMovie(movie.id, enriched)
-                    notifyRenderer('library-updated')
-                }
-            }).catch((err: any) => console.error('Watcher: Failed to generate thumbnail for', movie.title, err))
+            enqueueMetadata(movie, movie.id)
         }
     })
 
@@ -110,7 +116,7 @@ function syncLibrary() {
 
     if (addedCount > 0 || removedCount > 0 || thumbnailGenCount > 0) {
         console.log(`Watcher: Sync complete. Removed ${removedCount}, Added ${addedCount}, Generating thumbnails for ${thumbnailGenCount}.`)
-        notifyRenderer('library-updated')
+        scheduleLibraryUpdate()
     } else {
         console.log('Watcher: Sync complete. No changes.')
     }
@@ -149,16 +155,11 @@ function handleFileAdd(filePath: string) {
 
     try {
         const info = db.addMovie(movie)
-        notifyRenderer('library-updated')
+        scheduleLibraryUpdate()
 
         // Fetch metadata in background
         const movieWithId = { ...movie, id: info.lastInsertRowid }
-        fetchMetadata(movieWithId).then((enriched: any) => {
-            if (enriched) {
-                db.updateMovie(info.lastInsertRowid, enriched)
-                notifyRenderer('library-updated')
-            }
-        }).catch((err: any) => console.error('Metadata fetch failed:', err))
+        enqueueMetadata(movieWithId, info.lastInsertRowid)
 
         // Auto-generate playlists
         generateDefaultPlaylists()
@@ -178,7 +179,7 @@ function handleFileRemove(filePath: string) {
         // Cleanup empty playlists
         db.deleteEmptyPlaylists()
 
-        notifyRenderer('library-updated')
+        scheduleLibraryUpdate()
         notifyRenderer('playlists-updated')
     } catch (err) {
         console.error('Watcher: Failed to remove movie:', err)
@@ -206,4 +207,50 @@ function parseFilename(filename: string) {
 function notifyRenderer(channel: string, data?: any) {
     const wins = BrowserWindow.getAllWindows()
     wins.forEach(win => win.webContents.send(channel, data))
+}
+
+function scheduleLibraryUpdate() {
+    if (suppressLibraryUpdates) {
+        pendingLibraryUpdate = true
+        return
+    }
+
+    if (libraryUpdateTimer) return
+    libraryUpdateTimer = setTimeout(() => {
+        libraryUpdateTimer = null
+        if (pendingLibraryUpdate) {
+            pendingLibraryUpdate = false
+        }
+        notifyRenderer('library-updated')
+    }, 250)
+}
+
+function enqueueMetadata(movie: any, id: number | bigint) {
+    metadataQueue.push({ movie, id })
+    void processMetadataQueue()
+}
+
+async function processMetadataQueue() {
+    while (metadataWorkers < MAX_METADATA_CONCURRENCY && metadataQueue.length > 0) {
+        const job = metadataQueue.shift()
+        if (!job) return
+
+        metadataWorkers++
+        fetchMetadata(job.movie)
+            .then((enriched: any) => {
+                if (enriched) {
+                    db.updateMovie(job.id, enriched)
+                    metadataUpdatePending = true
+                }
+            })
+            .catch((err: any) => console.error('Metadata fetch failed:', err))
+            .finally(() => {
+                metadataWorkers--
+                if (metadataWorkers === 0 && metadataQueue.length === 0 && metadataUpdatePending) {
+                    metadataUpdatePending = false
+                    scheduleLibraryUpdate()
+                }
+                void processMetadataQueue()
+            })
+    }
 }

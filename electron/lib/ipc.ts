@@ -1,6 +1,25 @@
 import { ipcMain, dialog } from 'electron'
 import * as db from './database'
 import { updateWatcher } from './watcher'
+import {
+    getSecureStatus,
+    setSecurePassword,
+    unlockSecure,
+    lockSecure,
+    resetSecure,
+    listSecureItems,
+    importMovieToSecure,
+    importMovieWithPassword,
+    prepareSecurePlayback,
+    releaseSecurePlayback,
+    deleteSecureItem
+} from './secure'
+import { BrowserWindow } from 'electron'
+
+function notifyRenderer(channel: string, data?: any) {
+    const wins = BrowserWindow.getAllWindows()
+    wins.forEach(win => win.webContents.send(channel, data))
+}
 
 export function registerIPC() {
     ipcMain.handle('db:get-library', () => db.getMovies())
@@ -96,5 +115,58 @@ export function registerIPC() {
     ipcMain.handle('media:extract-subtitle-content', async (_, filePath, trackIndex) => {
         const { extractSubtitleContent } = await import('./ffmpeg')
         return extractSubtitleContent(filePath, trackIndex)
+    })
+
+    // Secure folder handlers
+    ipcMain.handle('secure:status', () => getSecureStatus())
+    ipcMain.handle('secure:set-password', async (_, password: string) => {
+        setSecurePassword(password)
+        return { ok: true }
+    })
+    ipcMain.handle('secure:unlock', async (_, password: string) => {
+        unlockSecure(password)
+        return { ok: true }
+    })
+    ipcMain.handle('secure:lock', async () => {
+        await lockSecure()
+        return { ok: true }
+    })
+    ipcMain.handle('secure:reset', async () => {
+        await resetSecure()
+        return { ok: true }
+    })
+    ipcMain.handle('secure:list', async () => {
+        return listSecureItems()
+    })
+    ipcMain.handle('secure:import-movie', async (_, movie: any) => {
+        try {
+            await importMovieToSecure(movie)
+            notifyRenderer('library-updated')
+            notifyRenderer('playlists-updated')
+            return { ok: true }
+        } catch (err: any) {
+            throw new Error(err?.message || 'Secure import failed')
+        }
+    })
+    ipcMain.handle('secure:import-movie-with-password', async (_, movie: any, password: string) => {
+        try {
+            await importMovieWithPassword(movie, password)
+            notifyRenderer('library-updated')
+            notifyRenderer('playlists-updated')
+            return { ok: true }
+        } catch (err: any) {
+            throw new Error(err?.message || 'Secure import failed')
+        }
+    })
+    ipcMain.handle('secure:prepare-playback', async (_, itemId: number) => {
+        return prepareSecurePlayback(itemId)
+    })
+    ipcMain.handle('secure:release-playback', async (_, tempPath: string) => {
+        await releaseSecurePlayback(tempPath)
+        return { ok: true }
+    })
+    ipcMain.handle('secure:delete-item', async (_, itemId: number) => {
+        await deleteSecureItem(itemId)
+        return { ok: true }
     })
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Movie, Playlist } from '../types'
-import { Star, Calendar, Plus, Check, X } from 'lucide-react'
+import { Star, Calendar, Plus, Check, X, Lock } from 'lucide-react'
 
 interface MovieCardProps {
     movie: Movie
@@ -23,6 +23,12 @@ export function MovieCard({ movie, onClick }: MovieCardProps) {
     const [newPlaylistName, setNewPlaylistName] = useState('')
     const selectorRef = useRef<HTMLDivElement>(null)
     const [imgError, setImgError] = useState(false)
+    const [secureModalOpen, setSecureModalOpen] = useState(false)
+    const [secureMode, setSecureMode] = useState<'confirm' | 'create' | 'unlock'>('unlock')
+    const [securePassword, setSecurePassword] = useState('')
+    const [secureConfirm, setSecureConfirm] = useState('')
+    const [secureError, setSecureError] = useState<string | null>(null)
+    const [secureBusy, setSecureBusy] = useState(false)
 
     // Properly encode Windows paths for the media:// protocol
     const posterUrl = movie.poster_path && !imgError
@@ -89,11 +95,142 @@ export function MovieCard({ movie, onClick }: MovieCardProps) {
         }
     }
 
+    const handleMoveToSecure = async (e: React.MouseEvent) => {
+        e.stopPropagation()
+        const status = await window.ipcRenderer.invoke('secure:status')
+        setSecureMode(status.isUnlocked ? 'confirm' : (status.hasPassword ? 'unlock' : 'create'))
+        setSecurePassword('')
+        setSecureConfirm('')
+        setSecureError(null)
+        setSecureModalOpen(true)
+    }
+
+    const handleSecureSubmit = async (e: React.FormEvent) => {
+        e.preventDefault()
+        setSecureError(null)
+        if (secureBusy) return
+        if (secureMode === 'confirm') {
+            // no password needed
+        } else if (secureMode === 'create') {
+            if (securePassword.length < 6) {
+                setSecureError('Password must be at least 6 characters.')
+                return
+            }
+            if (securePassword !== secureConfirm) {
+                setSecureError('Passwords do not match.')
+                return
+            }
+        } else {
+            if (!securePassword) {
+                setSecureError('Password is required.')
+                return
+            }
+        }
+        try {
+            setSecureBusy(true)
+            if (secureMode === 'confirm') {
+                await window.ipcRenderer.invoke('secure:import-movie', movie)
+            } else {
+                await window.ipcRenderer.invoke('secure:import-movie-with-password', movie, securePassword)
+            }
+            setSecureModalOpen(false)
+        } catch (err) {
+            setSecureError((err as any)?.message || 'Failed to move to Secure Folder.')
+        } finally {
+            setSecureBusy(false)
+        }
+    }
+
     return (
-        <div
-            className="group relative cursor-pointer"
-            onClick={onClick}
-        >
+        <>
+            {secureModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => !secureBusy && setSecureModalOpen(false)}>
+                    <div
+                        className="w-full max-w-md mx-4 bg-surface/95 border border-white/10 rounded-2xl p-6 shadow-2xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
+                                <Lock className="w-4 h-4 text-white/70" />
+                            </div>
+                            <div>
+                                <p className="text-white font-semibold">
+                                    {secureMode === 'confirm'
+                                        ? 'Move to Secure Folder'
+                                        : secureMode === 'create'
+                                            ? 'Create Secure Password'
+                                            : 'Unlock Secure Folder'}
+                                </p>
+                                <p className="text-xs text-textMuted">
+                                    {secureMode === 'confirm'
+                                        ? 'This will encrypt the video and remove it from your library.'
+                                        : secureMode === 'create'
+                                            ? 'This will encrypt the video and set up your vault.'
+                                            : 'Enter your password to encrypt and move this video.'}
+                                </p>
+                            </div>
+                        </div>
+
+                        {secureError && (
+                            <div className="mb-3 text-xs text-red-200 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                                {secureError}
+                            </div>
+                        )}
+
+                        <form onSubmit={handleSecureSubmit} className="space-y-3">
+                            {secureMode !== 'confirm' && (
+                                <>
+                                    <input
+                                        type="password"
+                                        value={securePassword}
+                                        onChange={(e) => setSecurePassword(e.target.value)}
+                                        placeholder={secureMode === 'create' ? 'New password' : 'Password'}
+                                        className="w-full bg-black/30 text-white text-sm px-3 py-2.5 rounded-lg border border-white/10 focus:border-primary/50 focus:ring-1 focus:ring-primary/40 focus:outline-none"
+                                        autoFocus
+                                        disabled={secureBusy}
+                                    />
+                                    {secureMode === 'create' && (
+                                        <input
+                                            type="password"
+                                            value={secureConfirm}
+                                            onChange={(e) => setSecureConfirm(e.target.value)}
+                                            placeholder="Confirm password"
+                                            className="w-full bg-black/30 text-white text-sm px-3 py-2.5 rounded-lg border border-white/10 focus:border-primary/50 focus:ring-1 focus:ring-primary/40 focus:outline-none"
+                                            disabled={secureBusy}
+                                        />
+                                    )}
+                                </>
+                            )}
+                            <div className="flex items-center justify-between pt-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setSecureModalOpen(false)}
+                                    className="text-xs text-textMuted hover:text-white transition-colors"
+                                    disabled={secureBusy}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="px-4 py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                                    disabled={secureBusy}
+                                >
+                                    {secureMode === 'confirm'
+                                        ? 'Move to Secure'
+                                        : secureMode === 'create'
+                                            ? 'Create & Move'
+                                            : 'Move to Secure'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            <div
+                className="group relative cursor-pointer"
+                onClick={onClick}
+            >
             <div className="relative">
                 <div className="relative aspect-video rounded-xl overflow-hidden bg-surfaceHighlight shadow-lg transition-all duration-300 group-hover:shadow-2xl group-hover:shadow-primary/10 group-hover:scale-[1.02]">
                     <img
@@ -123,13 +260,22 @@ export function MovieCard({ movie, onClick }: MovieCardProps) {
                                     )}
                                 </div>
 
-                                <button
-                                    onClick={handleAddToPlaylistClick}
-                                    className="p-2 bg-white/10 hover:bg-primary text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
-                                    title="Add to playlist"
-                                >
-                                    <Plus className="w-4 h-4" />
-                                </button>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        onClick={handleMoveToSecure}
+                                        className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
+                                        title="Move to Secure Folder"
+                                    >
+                                        <Lock className="w-4 h-4" />
+                                    </button>
+                                    <button
+                                        onClick={handleAddToPlaylistClick}
+                                        className="p-2 bg-white/10 hover:bg-primary text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
+                                        title="Add to playlist"
+                                    >
+                                        <Plus className="w-4 h-4" />
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -219,6 +365,7 @@ export function MovieCard({ movie, onClick }: MovieCardProps) {
                 <h3 className="font-medium text-text text-base line-clamp-2">{movie.title}</h3>
                 <p className="text-textMuted text-xs mt-0.5">{movie.year}</p>
             </div>
-        </div>
+            </div>
+        </>
     )
 }

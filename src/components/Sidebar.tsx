@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { Film, Settings, MonitorPlay, ListMusic, Plus, Trash2, RefreshCw } from 'lucide-react'
+import { Film, Settings, MonitorPlay, ListMusic, Plus, Trash2, RefreshCw, Lock } from 'lucide-react'
 import { clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import { useEffect, useState } from 'react'
@@ -183,7 +183,14 @@ export function Sidebar() {
 
             {/* Footer */}
             <div className="p-4 border-t border-white/5">
-                <div className="flex items-center justify-center">
+                <div className="flex items-center justify-between">
+                    <Link
+                        to="/secure"
+                        className="text-textMuted/40 hover:text-textMuted transition-colors p-1 rounded hover:bg-white/5"
+                        title="Secure Folder"
+                    >
+                        <Lock className="w-3.5 h-3.5" />
+                    </Link>
                     <p className="text-[10px] text-textMuted/30 font-medium hover:text-textMuted transition-colors cursor-default">
                         v0.1.0
                     </p>

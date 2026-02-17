@@ -65,6 +65,20 @@ export function initDB() {
       folder_name TEXT PRIMARY KEY,
       deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS secure_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      original_title TEXT,
+      year INTEGER,
+      plot TEXT,
+      poster_path TEXT,
+      backdrop_path TEXT,
+      rating REAL,
+      original_name TEXT NOT NULL,
+      encrypted_path TEXT UNIQUE NOT NULL,
+      added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `)
 }
 
@@ -106,6 +120,11 @@ export function getSetting(key: string) {
 export function setSetting(key: string, value: string) {
   const stmt = getDB().prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
   return stmt.run(key, value)
+}
+
+export function removeSetting(key: string) {
+  const stmt = getDB().prepare('DELETE FROM settings WHERE key = ?')
+  return stmt.run(key)
 }
 
 export function updateMovie(id: number | bigint, movie: any) {
@@ -213,6 +232,35 @@ export function getPlaylistMovies(playlistId: number) {
     WHERE pm.playlist_id = ?
     ORDER BY pm.added_at DESC
   `).all(playlistId)
+}
+
+// Secure items
+export function addSecureItem(item: any) {
+  const stmt = getDB().prepare(`
+    INSERT INTO secure_items (title, original_title, year, plot, poster_path, backdrop_path, rating, original_name, encrypted_path)
+    VALUES (@title, @original_title, @year, @plot, @poster_path, @backdrop_path, @rating, @original_name, @encrypted_path)
+  `)
+  return stmt.run(item)
+}
+
+export function getSecureItems() {
+  return getDB().prepare('SELECT * FROM secure_items ORDER BY added_at DESC').all()
+}
+
+export function getSecureItemById(id: number) {
+  return getDB().prepare('SELECT * FROM secure_items WHERE id = ?').get(id) as any | undefined
+}
+
+export function deleteSecureItem(id: number) {
+  return getDB().prepare('DELETE FROM secure_items WHERE id = ?').run(id)
+}
+
+export function deleteSecureItemByPath(encryptedPath: string) {
+  return getDB().prepare('DELETE FROM secure_items WHERE encrypted_path = ?').run(encryptedPath)
+}
+
+export function deleteAllSecureItems() {
+  return getDB().prepare('DELETE FROM secure_items').run()
 }
 
 // Playback Progress functions

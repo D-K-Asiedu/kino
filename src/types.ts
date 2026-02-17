@@ -18,6 +18,20 @@ export interface Playlist {
     movie_count?: number // Optional, might be useful for UI
 }
 
+export interface SecureItem {
+    id: number
+    title: string
+    original_title: string | null
+    year: number | null
+    plot: string | null
+    poster_path: string | null
+    backdrop_path: string | null
+    rating: number | null
+    original_name: string
+    encrypted_path: string
+    added_at: string
+}
+
 export interface AudioTrack {
     id: string
     kind: string

@@ -3,6 +3,7 @@ import { Sidebar } from './components/Sidebar'
 import { Library } from './pages/Library'
 import { Settings } from './pages/Settings'
 import { PlaylistPage } from './pages/PlaylistPage'
+import { SecureFolder } from './pages/SecureFolder'
 
 function App() {
     return (
@@ -14,6 +15,7 @@ function App() {
                         <Route path="/" element={<Library />} />
                         <Route path="/playlists/:id" element={<PlaylistPage />} />
                         <Route path="/settings" element={<Settings />} />
+                        <Route path="/secure" element={<SecureFolder />} />
                     </Routes>
                 </main>
             </div>

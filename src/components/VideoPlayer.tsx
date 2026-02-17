@@ -13,6 +13,7 @@ interface VideoPlayerProps {
     onPrevious?: () => void
     hasNext?: boolean
     hasPrevious?: boolean
+    disableProgress?: boolean
 }
 
 type SettingsTab = 'main' | 'audio' | 'subtitles' | 'speed' | 'shortcuts'
@@ -38,7 +39,7 @@ const removeStoredValue = (key: string) => {
     window.localStorage.removeItem(key)
 }
 
-export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPrevious }: VideoPlayerProps) {
+export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPrevious, disableProgress }: VideoPlayerProps) {
     const videoRef = useRef<HTMLVideoElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
     const controlsTimeoutRef = useRef<NodeJS.Timeout>()
@@ -156,6 +157,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     useEffect(() => {
         const loadProgress = async () => {
             try {
+                if (disableProgress) return
                 const progress = await window.ipcRenderer.invoke('db:get-playback-progress', movie.id)
                 if (progress && progress > 5) { // Only resume if watched more than 5 seconds
                     setSavedProgress(progress)
@@ -172,7 +174,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             }
         }
         loadProgress()
-    }, [movie.id])
+    }, [movie.id, disableProgress])
 
     useEffect(() => {
         setCurrentTime(0)
@@ -208,6 +210,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     // Save progress periodically
     useEffect(() => {
         const interval = setInterval(() => {
+            if (disableProgress) return
             if (isPlaying && videoRef.current) {
                 const time = videoRef.current.currentTime
                 if (time > 5 && duration > 0 && time < duration - 10) { // Don't save if at start or very end
@@ -217,11 +220,12 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         }, 5000)
 
         return () => clearInterval(interval)
-    }, [isPlaying, movie.id, duration])
+    }, [isPlaying, movie.id, duration, disableProgress])
 
     // Save on unmount
     useEffect(() => {
         return () => {
+            if (disableProgress) return
             if (videoRef.current) {
                 const time = videoRef.current.currentTime
                 if (time > 5) {
@@ -229,7 +233,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 }
             }
         }
-    }, [movie.id])
+    }, [movie.id, disableProgress])
 
     // Show up next overlay when video is 90% complete
     useEffect(() => {
@@ -351,7 +355,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 }))
                 setAudioTracks(tracks)
                 if (storedAudioLang) {
-                    const index = tracks.findIndex(track => (track.language && track.language === storedAudioLang) || (track.label && track.label === storedAudioLang))
+                    const index = tracks.findIndex((track: { language: string; label: string }) =>
+                        (track.language && track.language === storedAudioLang) || (track.label && track.label === storedAudioLang)
+                    )
                     if (index >= 0) {
                         setTimeout(() => toggleAudioTrack(index), 0)
                     }
@@ -370,7 +376,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 // Add to state but don't add to video yet until selected
                 setTextTracks(tracks as any)
                 if (storedSubtitleLang) {
-                    const subtitleIndex = tracks.findIndex(track => (track.language && track.language === storedSubtitleLang) || (track.label && track.label === storedSubtitleLang))
+                    const subtitleIndex = tracks.findIndex((track: { language: string; label: string }) =>
+                        (track.language && track.language === storedSubtitleLang) || (track.label && track.label === storedSubtitleLang)
+                    )
                     if (subtitleIndex >= 0) {
                         setTimeout(() => toggleSubtitleTrack(subtitleIndex, tracks), 100)
                     }
