@@ -219,12 +219,12 @@ export function PlaylistPage() {
                                 setShowFilterMenu(!showFilterMenu)
                                 setShowSortMenu(false)
                             }}
-                            className="flex items-center gap-2 bg-surface/80 text-sm text-white px-3 py-2 rounded-full border border-white/10 hover:bg-surfaceHighlight/80 transition-all shadow-sm min-w-[170px]"
+                            className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${showFilterMenu || filterBy !== 'all' ? 'text-white bg-white/10' : 'text-textMuted hover:text-white hover:bg-white/5'}`}
                             aria-label="Filter playlist movies"
                         >
-                            <SlidersHorizontal className="w-4 h-4 text-textMuted" />
-                            <span className="flex-1 text-left">{filterOptions.find(o => o.value === filterBy)?.label}</span>
-                            <ChevronDown className={`w-4 h-4 text-textMuted transition-transform ${showFilterMenu ? 'rotate-180' : ''}`} />
+                            <SlidersHorizontal className="w-4 h-4" />
+                            <span>{filterOptions.find(o => o.value === filterBy)?.label}</span>
+                            <ChevronDown className={`w-3.5 h-3.5 opacity-50 transition-transform ${showFilterMenu ? 'rotate-180' : ''}`} />
                         </button>
                         {showFilterMenu && (
                             <div className="absolute right-0 mt-2 w-56 bg-surface/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
@@ -254,12 +254,12 @@ export function PlaylistPage() {
                                 setShowSortMenu(!showSortMenu)
                                 setShowFilterMenu(false)
                             }}
-                            className="flex items-center gap-2 bg-surface/80 text-sm text-white px-3 py-2 rounded-full border border-white/10 hover:bg-surfaceHighlight/80 transition-all shadow-sm min-w-[170px]"
+                            className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${showSortMenu || sortBy !== 'recent' ? 'text-white bg-white/10' : 'text-textMuted hover:text-white hover:bg-white/5'}`}
                             aria-label="Sort playlist movies"
                         >
-                            <ArrowUpDown className="w-4 h-4 text-textMuted" />
-                            <span className="flex-1 text-left">{sortOptions.find(o => o.value === sortBy)?.label}</span>
-                            <ChevronDown className={`w-4 h-4 text-textMuted transition-transform ${showSortMenu ? 'rotate-180' : ''}`} />
+                            <ArrowUpDown className="w-4 h-4" />
+                            <span>{sortOptions.find(o => o.value === sortBy)?.label}</span>
+                            <ChevronDown className={`w-3.5 h-3.5 opacity-50 transition-transform ${showSortMenu ? 'rotate-180' : ''}`} />
                         </button>
                         {showSortMenu && (
                             <div className="absolute right-0 mt-2 w-56 bg-surface/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
