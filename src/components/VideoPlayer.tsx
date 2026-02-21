@@ -214,7 +214,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             if (isPlaying && videoRef.current) {
                 const time = videoRef.current.currentTime
                 if (time > 5 && duration > 0 && time < duration - 10) { // Don't save if at start or very end
-                    window.ipcRenderer.invoke('db:update-playback-progress', movie.id, time)
+                    window.ipcRenderer.invoke('db:update-playback-progress', movie.id, time, duration)
                 }
             }
         }, 5000)
@@ -229,11 +229,11 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             if (videoRef.current) {
                 const time = videoRef.current.currentTime
                 if (time > 5) {
-                    window.ipcRenderer.invoke('db:update-playback-progress', movie.id, time)
+                    window.ipcRenderer.invoke('db:update-playback-progress', movie.id, time, duration)
                 }
             }
         }
-    }, [movie.id, disableProgress])
+    }, [movie.id, duration, disableProgress])
 
     // Show up next overlay when video is 90% complete
     useEffect(() => {

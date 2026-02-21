@@ -1,5 +1,6 @@
 import { HashRouter, Routes, Route } from 'react-router-dom'
 import { Sidebar } from './components/Sidebar'
+import { Home } from './pages/Home'
 import { Library } from './pages/Library'
 import { Settings } from './pages/Settings'
 import { PlaylistPage } from './pages/PlaylistPage'
@@ -12,7 +13,8 @@ function App() {
                 <Sidebar />
                 <main className="flex-1 overflow-y-auto relative">
                     <Routes>
-                        <Route path="/" element={<Library />} />
+                        <Route path="/" element={<Home />} />
+                        <Route path="/library" element={<Library />} />
                         <Route path="/playlists/:id" element={<PlaylistPage />} />
                         <Route path="/settings" element={<Settings />} />
                         <Route path="/secure" element={<SecureFolder />} />

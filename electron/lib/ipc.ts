@@ -47,6 +47,7 @@ export function registerIPC() {
     })
     ipcMain.handle('settings:get', (_, key) => db.getSetting(key))
     ipcMain.handle('settings:set', (_, key, value) => db.setSetting(key, value))
+    ipcMain.handle('db:get-home-data', () => db.getHomeData())
 
     // Playlist handlers
     ipcMain.handle('db:create-playlist', (_, name) => {
@@ -68,10 +69,11 @@ export function registerIPC() {
     ipcMain.handle('db:add-movie-to-playlist', (_, playlistId, movieId) => db.addMovieToPlaylist(playlistId, movieId))
     ipcMain.handle('db:remove-movie-from-playlist', (_, playlistId, movieId) => db.removeMovieFromPlaylist(playlistId, movieId))
     ipcMain.handle('db:get-playlist-movies', (_, playlistId) => db.getPlaylistMovies(playlistId))
+    ipcMain.handle('db:update-playlist-last-watched', (_, playlistId) => db.updatePlaylistLastWatched(playlistId))
 
-    // Playback Progress handlers
-    ipcMain.handle('db:update-playback-progress', (_, movieId, progress) => db.updatePlaybackProgress(movieId, progress))
+    // Video progress handlers
     ipcMain.handle('db:get-playback-progress', (_, movieId) => db.getPlaybackProgress(movieId))
+    ipcMain.handle('db:update-playback-progress', (_, movieId, progress, duration) => db.updatePlaybackProgress(movieId, progress, duration))
 
     ipcMain.handle('db:generate-default-playlists', async () => {
         const { generateDefaultPlaylists } = await import('./playlists')

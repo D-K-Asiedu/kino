@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { Movie, Playlist } from '../types'
-import { Star, Calendar, Plus, Check, X, Lock } from 'lucide-react'
+import { Star, Calendar, Plus, Check, X, Lock, Play } from 'lucide-react'
 
 interface MovieCardProps {
     movie: Movie
     onClick?: () => void
+    progress?: number
 }
 
 // Inline SVG placeholder for missing posters (no network dependency)
@@ -15,7 +16,7 @@ const PLACEHOLDER_POSTER = `data:image/svg+xml,${encodeURIComponent(`
 </svg>
 `)}`
 
-export function MovieCard({ movie, onClick }: MovieCardProps) {
+export function MovieCard({ movie, onClick, progress }: MovieCardProps) {
     const [showPlaylistSelector, setShowPlaylistSelector] = useState(false)
     const [playlists, setPlaylists] = useState<Playlist[]>([])
     const [addedToPlaylist, setAddedToPlaylist] = useState<number | null>(null)
@@ -247,140 +248,157 @@ export function MovieCard({ movie, onClick }: MovieCardProps) {
                 className="group relative cursor-pointer"
                 onClick={onClick}
             >
-            <div className="relative">
-                <div className="relative aspect-video rounded-xl overflow-hidden bg-surfaceHighlight shadow-lg transition-all duration-300 group-hover:shadow-2xl group-hover:shadow-primary/10 group-hover:scale-[1.02]">
-                    <img
-                        src={posterUrl}
-                        alt={movie.title}
-                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                        loading="lazy"
-                        onError={() => setImgError(true)}
-                    />
+                <div className="relative">
+                    <div className="relative aspect-video rounded-xl overflow-hidden bg-surfaceHighlight shadow-lg transition-all duration-300 group-hover:shadow-2xl group-hover:shadow-primary/10 group-hover:scale-[1.02]">
+                        <img
+                            src={posterUrl}
+                            alt={movie.title}
+                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+                            loading="lazy"
+                            onError={() => setImgError(true)}
+                        />
 
-                    {/* Gradient Overlay */}
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
-                        <div className="transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300">
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-3 text-xs text-gray-300">
-                                    {movie.year && (
-                                        <div className="flex items-center gap-1">
-                                            <Calendar className="w-3 h-3" />
-                                            <span>{movie.year}</span>
-                                        </div>
-                                    )}
-                                    {movie.rating && (
-                                        <div className="flex items-center gap-1 text-yellow-400">
-                                            <Star className="w-3 h-3 fill-current" />
-                                            <span>{movie.rating.toFixed(1)}</span>
-                                        </div>
-                                    )}
-                                </div>
+                        {/* Hover Play Button Overlay */}
+                        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-black/10 backdrop-blur-[1px] pointer-events-none">
+                            <div className="w-14 h-14 rounded-full bg-primary/90 flex items-center justify-center shadow-2xl transform scale-75 group-hover:scale-100 transition-all duration-300">
+                                <Play className="w-6 h-6 text-white fill-current ml-1" />
+                            </div>
+                        </div>
 
-                                <div className="flex items-center gap-2">
-                                    <button
-                                        onClick={handleMoveToSecure}
-                                        className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
-                                        title="Move to Secure Folder"
-                                    >
-                                        <Lock className="w-4 h-4" />
-                                    </button>
-                                    <button
-                                        onClick={handleAddToPlaylistClick}
-                                        className="p-2 bg-white/10 hover:bg-primary text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
-                                        title="Add to playlist"
-                                    >
-                                        <Plus className="w-4 h-4" />
-                                    </button>
+                        {/* Gradient Overlay for Bottom Utilities */}
+                        <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4 pointer-events-none">
+                            <div className="transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300 pointer-events-auto">
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-3 text-xs text-gray-300">
+                                        {movie.year && (
+                                            <div className="flex items-center gap-1">
+                                                <Calendar className="w-3 h-3" />
+                                                <span>{movie.year}</span>
+                                            </div>
+                                        )}
+                                        {movie.rating && (
+                                            <div className="flex items-center gap-1 text-yellow-400">
+                                                <Star className="w-3 h-3 fill-current" />
+                                                <span>{movie.rating.toFixed(1)}</span>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={handleMoveToSecure}
+                                            className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
+                                            title="Move to Secure Folder"
+                                        >
+                                            <Lock className="w-4 h-4" />
+                                        </button>
+                                        <button
+                                            onClick={handleAddToPlaylistClick}
+                                            className="p-2 bg-white/10 hover:bg-primary text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
+                                            title="Add to playlist"
+                                        >
+                                            <Plus className="w-4 h-4" />
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                </div>
 
-                {/* Playlist Selector */}
-                {showPlaylistSelector && (
-                    <div
-                        ref={selectorRef}
-                        className="absolute bottom-14 right-4 w-64 bg-surface/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-bottom-2"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="flex items-center justify-between p-3 border-b border-white/5 bg-white/5">
-                            <span className="text-xs font-bold text-white uppercase tracking-wider">Add to Playlist</span>
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation()
-                                    setShowPlaylistSelector(false)
-                                }}
-                                className="text-textMuted hover:text-white transition-colors"
-                            >
-                                <X className="w-3.5 h-3.5" />
-                            </button>
+                    {/* Progress Bar (Visible even without hover) */}
+                    {progress !== undefined && progress > 0 && (
+                        <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/20">
+                            <div
+                                className="h-full bg-primary"
+                                style={{ width: `${Math.min(100, Math.max(0, progress * 100))}%` }}
+                            />
                         </div>
+                    )}
 
-                        <div className="p-2">
-                            {isCreating ? (
-                                <form onSubmit={handleCreatePlaylist} className="mb-2">
-                                    <div className="flex gap-2">
-                                        <input
-                                            type="text"
-                                            value={newPlaylistName}
-                                            onChange={(e) => setNewPlaylistName(e.target.value)}
-                                            placeholder="Name..."
-                                            className="flex-1 bg-black/40 text-white text-xs px-2 py-1.5 rounded border border-white/10 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 focus:outline-none placeholder:text-textMuted/50"
-                                            autoFocus
-                                            onClick={(e) => e.stopPropagation()}
-                                        />
-                                        <button
-                                            type="submit"
-                                            className="px-2 py-1 bg-primary text-white text-xs rounded hover:bg-primary/90 transition-colors"
-                                        >
-                                            Add
-                                        </button>
-                                    </div>
-                                </form>
-                            ) : (
+                    {/* Playlist Selector */}
+                    {showPlaylistSelector && (
+                        <div
+                            ref={selectorRef}
+                            className="absolute bottom-14 right-4 w-64 bg-surface/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-bottom-2"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <div className="flex items-center justify-between p-3 border-b border-white/5 bg-white/5">
+                                <span className="text-xs font-bold text-white uppercase tracking-wider">Add to Playlist</span>
                                 <button
                                     onClick={(e) => {
                                         e.stopPropagation()
-                                        setIsCreating(true)
+                                        setShowPlaylistSelector(false)
                                     }}
-                                    className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-textMuted hover:text-primary hover:bg-primary/10 rounded transition-colors mb-1"
+                                    className="text-textMuted hover:text-white transition-colors"
                                 >
-                                    <Plus className="w-3 h-3" />
-                                    <span>Create New Playlist</span>
+                                    <X className="w-3.5 h-3.5" />
                                 </button>
-                            )}
+                            </div>
 
-                            <div className="max-h-48 overflow-y-auto custom-scrollbar space-y-0.5">
-                                {playlists.length === 0 ? (
-                                    <div className="px-2 py-4 text-xs text-textMuted text-center italic">
-                                        No playlists yet
-                                    </div>
+                            <div className="p-2">
+                                {isCreating ? (
+                                    <form onSubmit={handleCreatePlaylist} className="mb-2">
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="text"
+                                                value={newPlaylistName}
+                                                onChange={(e) => setNewPlaylistName(e.target.value)}
+                                                placeholder="Name..."
+                                                className="flex-1 bg-black/40 text-white text-xs px-2 py-1.5 rounded border border-white/10 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 focus:outline-none placeholder:text-textMuted/50"
+                                                autoFocus
+                                                onClick={(e) => e.stopPropagation()}
+                                            />
+                                            <button
+                                                type="submit"
+                                                className="px-2 py-1 bg-primary text-white text-xs rounded hover:bg-primary/90 transition-colors"
+                                            >
+                                                Add
+                                            </button>
+                                        </div>
+                                    </form>
                                 ) : (
-                                    playlists.map((playlist) => (
-                                        <button
-                                            key={playlist.id}
-                                            onClick={(e) => handlePlaylistSelect(e, playlist.id)}
-                                            className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-white/10 hover:text-white rounded flex items-center justify-between group/item transition-colors"
-                                        >
-                                            <span className="truncate">{playlist.name}</span>
-                                            {addedToPlaylist === playlist.id && (
-                                                <Check className="w-3.5 h-3.5 text-green-400" />
-                                            )}
-                                        </button>
-                                    ))
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation()
+                                            setIsCreating(true)
+                                        }}
+                                        className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-textMuted hover:text-primary hover:bg-primary/10 rounded transition-colors mb-1"
+                                    >
+                                        <Plus className="w-3 h-3" />
+                                        <span>Create New Playlist</span>
+                                    </button>
                                 )}
+
+                                <div className="max-h-48 overflow-y-auto custom-scrollbar space-y-0.5">
+                                    {playlists.length === 0 ? (
+                                        <div className="px-2 py-4 text-xs text-textMuted text-center italic">
+                                            No playlists yet
+                                        </div>
+                                    ) : (
+                                        playlists.map((playlist) => (
+                                            <button
+                                                key={playlist.id}
+                                                onClick={(e) => handlePlaylistSelect(e, playlist.id)}
+                                                className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-white/10 hover:text-white rounded flex items-center justify-between group/item transition-colors"
+                                            >
+                                                <span className="truncate">{playlist.name}</span>
+                                                {addedToPlaylist === playlist.id && (
+                                                    <Check className="w-3.5 h-3.5 text-green-400" />
+                                                )}
+                                            </button>
+                                        ))
+                                    )}
+                                </div>
                             </div>
                         </div>
-                    </div>
-                )}
-            </div>
+                    )}
+                </div>
 
-            {/* Title below card */}
-            <div className="mt-3">
-                <h3 className="font-medium text-text text-base line-clamp-2">{movie.title}</h3>
-                <p className="text-textMuted text-xs mt-0.5">{movie.year}</p>
-            </div>
+                {/* Title below card */}
+                <div className="mt-3">
+                    <h3 className="font-medium text-text text-base line-clamp-2">{movie.title}</h3>
+                    <p className="text-textMuted text-xs mt-0.5">{movie.year}</p>
+                </div>
             </div>
         </>
     )

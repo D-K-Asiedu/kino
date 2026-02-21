@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { Film, Settings, MonitorPlay, ListMusic, Plus, Trash2, RefreshCw, Lock } from 'lucide-react'
+import { Film, Settings, MonitorPlay, ListMusic, Plus, Trash2, RefreshCw, Lock, Home } from 'lucide-react'
 import { clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import { useEffect, useState } from 'react'
@@ -62,7 +62,8 @@ export function Sidebar() {
     }
 
     const navItems = [
-        { path: '/', label: 'Library', icon: Film },
+        { path: '/', label: 'Home', icon: Home },
+        { path: '/library', label: 'Library', icon: Film },
         { path: '/settings', label: 'Settings', icon: Settings },
     ]
 

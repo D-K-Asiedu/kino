@@ -95,6 +95,18 @@ export function initDB() {
   `)
 
   ensureMovieColumns()
+  ensurePlaybackProgressColumns()
+}
+
+function ensurePlaybackProgressColumns() {
+  const columns = getDB().prepare('PRAGMA table_info(playback_progress)').all() as { name: string }[]
+  const names = new Set(columns.map(col => col.name))
+
+  if (!names.has('duration')) {
+    getDB().exec('ALTER TABLE playback_progress ADD COLUMN duration REAL DEFAULT 0')
+  }
+
+  ensurePlaylistColumns()
 }
 
 function ensureMovieColumns() {
@@ -199,14 +211,14 @@ export function removeMoviesByWatchPath(watchPath: string) {
   // Normalize the path and add trailing separator to ensure we match the exact folder
   const normalizedPath = watchPath.endsWith(path.sep) ? watchPath : watchPath + path.sep
   console.log('Database: Removing movies from watch path:', normalizedPath)
-  
+
   // Use LIKE with escape for paths starting with the watch path
   const result = getDB().prepare(`
     DELETE FROM movies 
     WHERE file_path LIKE ? ESCAPE '\\'
        OR file_path = ?
   `).run(`${normalizedPath.replace(/[%_]/g, '\\$&')}%`, watchPath)
-  
+
   console.log('Database: Removed', result.changes, 'movies from watch path')
   return result
 }
@@ -272,12 +284,26 @@ export function getWatchPathById(id: number) {
 }
 
 // Playlist functions
+export function ensurePlaylistColumns() {
+  const columns = getDB().prepare('PRAGMA table_info(playlists)').all() as { name: string }[]
+  const names = new Set(columns.map(col => col.name))
+
+  if (!names.has('last_watched')) {
+    getDB().exec('ALTER TABLE playlists ADD COLUMN last_watched DATETIME')
+  }
+}
+
 export function createPlaylist(name: string) {
   return getDB().prepare('INSERT INTO playlists (name) VALUES (?)').run(name)
 }
 
 export function getPlaylists() {
   return getDB().prepare('SELECT * FROM playlists ORDER BY created_at DESC').all()
+}
+
+export function updatePlaylistLastWatched(id: number) {
+  const stmt = getDB().prepare('UPDATE playlists SET last_watched = CURRENT_TIMESTAMP WHERE id = ?')
+  return stmt.run(id)
 }
 
 export function getPlaylistById(id: number) {
@@ -366,17 +392,101 @@ export function deleteAllSecureItems() {
 }
 
 // Playback Progress functions
-export function updatePlaybackProgress(movieId: number, progress: number) {
+export function updatePlaybackProgress(movieId: number, progress: number, duration: number = 0) {
   const stmt = getDB().prepare(`
-    INSERT OR REPLACE INTO playback_progress (movie_id, progress, last_watched)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
+    INSERT OR REPLACE INTO playback_progress (movie_id, progress, duration, last_watched)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
   `)
-  return stmt.run(movieId, progress)
+  return stmt.run(movieId, progress, duration)
 }
 
 export function getPlaybackProgress(movieId: number) {
   const row = getDB().prepare('SELECT progress FROM playback_progress WHERE movie_id = ?').get(movieId) as { progress: number } | undefined
   return row ? row.progress : 0
+}
+
+// Home Page Data
+export function getHomeData() {
+  const continueWatching = getDB().prepare(`
+    SELECT m.*, p.progress, p.duration, p.last_watched 
+    FROM movies m 
+    JOIN playback_progress p ON m.id = p.movie_id 
+    ORDER BY p.last_watched DESC 
+    LIMIT 10
+  `).all()
+
+  const recentlyAdded = getDB().prepare(`
+    SELECT * FROM movies 
+    ORDER BY added_at DESC 
+    LIMIT 10
+  `).all()
+
+  const randomSuggestions = getDB().prepare(`
+    SELECT * FROM movies 
+    ORDER BY RANDOM() 
+    LIMIT 6
+  `).all()
+
+  const lastWatchedPlaylistIdSetting = getSetting('last_watched_playlist_id')
+  let lastWatchedPlaylist = null
+  if (lastWatchedPlaylistIdSetting) {
+    const playlistId = parseInt(lastWatchedPlaylistIdSetting, 10)
+    if (!isNaN(playlistId)) {
+      const playlistInfo = getPlaylistById(playlistId)
+      if (playlistInfo) {
+        const movies = getPlaylistMovies(playlistId)
+        lastWatchedPlaylist = {
+          ...playlistInfo,
+          movies
+        }
+      }
+    }
+  }
+
+  // Helper to fetch playlists with up to 4 movies for thumbnails
+  const fetchPlaylistsWithMovies = (query: string) => {
+    const playlists = getDB().prepare(query).all() as any[]
+    return playlists.map(playlist => {
+      const movies = getDB().prepare(`
+        SELECT m.*
+        FROM movies m
+        JOIN playlist_movies pm ON m.id = pm.movie_id
+        WHERE pm.playlist_id = ?
+        ORDER BY pm.added_at DESC
+        LIMIT 4
+      `).all(playlist.id)
+      return { ...playlist, movies }
+    })
+  }
+
+  const recentlyWatchedPlaylists = fetchPlaylistsWithMovies(`
+    SELECT * FROM playlists 
+    WHERE last_watched IS NOT NULL 
+    ORDER BY last_watched DESC 
+    LIMIT 10
+  `)
+
+  const latestPlaylists = fetchPlaylistsWithMovies(`
+    SELECT * FROM playlists 
+    ORDER BY created_at DESC 
+    LIMIT 10
+  `)
+
+  const recommendedPlaylists = fetchPlaylistsWithMovies(`
+    SELECT * FROM playlists 
+    ORDER BY RANDOM() 
+    LIMIT 10
+  `)
+
+  return {
+    continueWatching,
+    recentlyAdded,
+    randomSuggestions,
+    lastWatchedPlaylist,
+    recentlyWatchedPlaylists,
+    latestPlaylists,
+    recommendedPlaylists
+  }
 }
 
 // Export getDB for direct access if needed

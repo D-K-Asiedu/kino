@@ -138,8 +138,14 @@ export function PlaylistPage() {
         }
     }, [selectedMovie, visibleMovies])
 
-    const handlePlayMovie = (movie: Movie) => {
+    const handlePlayMovie = async (movie: Movie) => {
         setSelectedMovie(movie)
+        if (playlist) {
+            // Save the current playlist as the last watched in settings (legacy)
+            await window.ipcRenderer.invoke('settings:set', 'last_watched_playlist_id', playlist.id.toString());
+            // Update the last watched timestamp for this playlist in the database
+            await window.ipcRenderer.invoke('db:update-playlist-last-watched', playlist.id);
+        }
     }
 
     const handleNext = () => {
