@@ -1,12 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { MovieCard } from '../components/MovieCard'
 import { VideoPlayer } from '../components/VideoPlayer'
+import { VirtualMovieGrid } from '../components/VirtualMovieGrid'
 import { Movie } from '../types'
 import { Search, SlidersHorizontal, ArrowUpDown, ChevronDown, Check } from 'lucide-react'
+import { useCoalescedIpcRefresh } from '../hooks/useCoalescedIpcRefresh'
+
+const PAGE_SIZE = 120
 
 export function Library() {
     const [movies, setMovies] = useState<Movie[]>([])
+    const [totalMovies, setTotalMovies] = useState(0)
+    const [hasMore, setHasMore] = useState(false)
+    const [loadingMore, setLoadingMore] = useState(false)
     const [searchQuery, setSearchQuery] = useState('')
+    const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('')
     const [filterBy, setFilterBy] = useState('all')
     const [sortBy, setSortBy] = useState('recent')
     const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null)
@@ -17,34 +25,98 @@ export function Library() {
     const filterMenuRef = useRef<HTMLDivElement | null>(null)
     const sortMenuRef = useRef<HTMLDivElement | null>(null)
 
-    const fetchMovies = async () => {
+    useEffect(() => {
+        const timer = window.setTimeout(() => {
+            setDebouncedSearchQuery(searchQuery)
+        }, 180)
+        return () => window.clearTimeout(timer)
+    }, [searchQuery])
+
+    const fetchMoviesPage = useCallback(async (offset = 0, replace = true) => {
         try {
-            setLoading(true)
-            const data = await window.ipcRenderer.invoke('db:get-library')
-            setMovies(data)
+            if (replace) {
+                setLoading(true)
+            } else {
+                setLoadingMore(true)
+            }
+            const page = await window.ipcRenderer.invoke('db:get-library-page', {
+                searchQuery: debouncedSearchQuery,
+                filterBy,
+                sortBy,
+                limit: PAGE_SIZE,
+                offset,
+            }) as {
+                items: Movie[]
+                total: number
+                hasMore: boolean
+            }
+
+            if (replace) {
+                setMovies(page.items)
+            } else {
+                setMovies(prev => {
+                    if (page.items.length === 0) return prev
+                    const seen = new Set(prev.map(m => m.id))
+                    const additions = page.items.filter(m => !seen.has(m.id))
+                    return additions.length > 0 ? prev.concat(additions) : prev
+                })
+            }
+            setTotalMovies(page.total)
+            setHasMore(page.hasMore)
             setError(null)
         } catch (err: any) {
             setError(err.message || 'Failed to load movies')
             console.error('Error fetching movies:', err)
         } finally {
             setLoading(false)
+            setLoadingMore(false)
         }
-    }
+    }, [debouncedSearchQuery, filterBy, sortBy])
+
+    const fetchInitialMovies = useCallback(async () => {
+        await fetchMoviesPage(0, true)
+    }, [fetchMoviesPage])
+
+    const fetchMoreMovies = useCallback(async () => {
+        if (loading || loadingMore || !hasMore) return
+        await fetchMoviesPage(movies.length, false)
+    }, [fetchMoviesPage, hasMore, loading, loadingMore, movies.length])
+
+    const { runNow: refreshMovies } = useCoalescedIpcRefresh(
+        fetchInitialMovies,
+        ['library-updated'],
+        { delayMs: 140 }
+    )
 
     useEffect(() => {
-        fetchMovies()
+        void refreshMovies()
+    }, [refreshMovies, debouncedSearchQuery, filterBy, sortBy])
 
-        // Listen for library updates
-        const handleLibraryUpdate = () => {
-            fetchMovies()
+    useEffect(() => {
+        const scrollRoot = document.getElementById('app-scroll-root')
+        if (!scrollRoot) return
+
+        let rafId: number | null = null
+        const onScroll = () => {
+            if (rafId !== null) return
+            rafId = requestAnimationFrame(() => {
+                rafId = null
+                if (loading || loadingMore || !hasMore) return
+                const remaining = scrollRoot.scrollHeight - (scrollRoot.scrollTop + scrollRoot.clientHeight)
+                if (remaining < 700) {
+                    void fetchMoreMovies()
+                }
+            })
         }
 
-        window.ipcRenderer.on('library-updated', handleLibraryUpdate)
-
+        scrollRoot.addEventListener('scroll', onScroll, { passive: true })
         return () => {
-            window.ipcRenderer.off('library-updated', handleLibraryUpdate)
+            scrollRoot.removeEventListener('scroll', onScroll)
+            if (rafId !== null) {
+                cancelAnimationFrame(rafId)
+            }
         }
-    }, [])
+    }, [fetchMoreMovies, hasMore, loading, loadingMore])
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -60,66 +132,11 @@ export function Library() {
         return () => document.removeEventListener('mousedown', handleClickOutside)
     }, [])
 
-    const matchesFilter = (movie: Movie) => {
-        switch (filterBy) {
-            case 'rated':
-                return movie.rating !== null
-            case 'unrated':
-                return movie.rating === null
-            case 'year-2020s':
-                return movie.year !== null && movie.year >= 2020
-            case 'year-2010s':
-                return movie.year !== null && movie.year >= 2010 && movie.year <= 2019
-            case 'year-2000s':
-                return movie.year !== null && movie.year >= 2000 && movie.year <= 2009
-            case 'year-1990s':
-                return movie.year !== null && movie.year >= 1990 && movie.year <= 1999
-            case 'year-1980s':
-                return movie.year !== null && movie.year >= 1980 && movie.year <= 1989
-            case 'year-older':
-                return movie.year !== null && movie.year < 1980
-            default:
-                return true
-        }
-    }
-
-    const sortMovies = (list: Movie[]) => {
-        const sorted = [...list]
-        switch (sortBy) {
-            case 'title-asc':
-                return sorted.sort((a, b) => a.title.localeCompare(b.title))
-            case 'title-desc':
-                return sorted.sort((a, b) => b.title.localeCompare(a.title))
-            case 'year-desc':
-                return sorted.sort((a, b) => (b.year ?? -Infinity) - (a.year ?? -Infinity))
-            case 'year-asc':
-                return sorted.sort((a, b) => (a.year ?? Infinity) - (b.year ?? Infinity))
-            case 'rating-desc':
-                return sorted.sort((a, b) => (b.rating ?? -Infinity) - (a.rating ?? -Infinity))
-            case 'rating-asc':
-                return sorted.sort((a, b) => (a.rating ?? Infinity) - (b.rating ?? Infinity))
-            case 'recent':
-            default:
-                return sorted.sort(
-                    (a, b) => new Date(b.added_at).getTime() - new Date(a.added_at).getTime()
-                )
-        }
-    }
-
-    const visibleMovies = useMemo(() => {
-        const query = searchQuery.trim().toLowerCase()
-        const searched = query
-            ? movies.filter(movie => movie.title.toLowerCase().includes(query))
-            : movies
-        const filtered = searched.filter(matchesFilter)
-        return sortMovies(filtered)
-    }, [movies, searchQuery, filterBy, sortBy])
-
     useEffect(() => {
-        if (selectedMovie && !visibleMovies.some(movie => movie.id === selectedMovie.id)) {
+        if (selectedMovie && !movies.some(movie => movie.id === selectedMovie.id)) {
             setSelectedMovie(null)
         }
-    }, [selectedMovie, visibleMovies])
+    }, [selectedMovie, movies])
 
     if (error) {
         return (
@@ -127,7 +144,9 @@ export function Library() {
                 <div className="text-center">
                     <p className="text-red-400 mb-4">Error: {error}</p>
                     <button
-                        onClick={fetchMovies}
+                        onClick={() => {
+                            void refreshMovies()
+                        }}
                         className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-blue-700 transition-colors"
                     >
                         Retry
@@ -143,23 +162,23 @@ export function Library() {
 
     const handleNext = () => {
         if (!selectedMovie) return
-        const currentIndex = visibleMovies.findIndex(m => m.id === selectedMovie.id)
-        if (currentIndex >= 0 && currentIndex < visibleMovies.length - 1) {
-            setSelectedMovie(visibleMovies[currentIndex + 1])
+        const currentIndex = movies.findIndex(m => m.id === selectedMovie.id)
+        if (currentIndex >= 0 && currentIndex < movies.length - 1) {
+            setSelectedMovie(movies[currentIndex + 1])
         }
     }
 
     const handlePrevious = () => {
         if (!selectedMovie) return
-        const currentIndex = visibleMovies.findIndex(m => m.id === selectedMovie.id)
+        const currentIndex = movies.findIndex(m => m.id === selectedMovie.id)
         if (currentIndex > 0) {
-            setSelectedMovie(visibleMovies[currentIndex - 1])
+            setSelectedMovie(movies[currentIndex - 1])
         }
     }
 
     const getCurrentIndex = () => {
         if (!selectedMovie) return -1
-        return visibleMovies.findIndex(m => m.id === selectedMovie.id)
+        return movies.findIndex(m => m.id === selectedMovie.id)
     }
 
     const filterOptions = [
@@ -190,9 +209,9 @@ export function Library() {
                 <div>
                     <h2 className="text-3xl font-bold text-white tracking-tight">Library</h2>
                     <p className="text-textMuted mt-1">
-                        {visibleMovies.length}
-                        {visibleMovies.length === 1 ? ' movie' : ' movies'}
-                        {searchQuery.trim() || filterBy !== 'all' ? ` of ${movies.length}` : ''} in your collection
+                        {movies.length}
+                        {movies.length === 1 ? ' movie' : ' movies'}
+                        {totalMovies > movies.length ? ` of ${totalMovies}` : ''} loaded
                     </p>
                 </div>
 
@@ -286,18 +305,24 @@ export function Library() {
                 </div>
             ) : (
                 <>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                        {visibleMovies.map((movie) => (
+                    <VirtualMovieGrid
+                        items={movies}
+                        getItemKey={(movie) => movie.id}
+                        renderItem={(movie) => (
                             <MovieCard
-                                key={movie.id}
                                 movie={movie}
                                 onClick={() => handlePlayMovie(movie)}
                             />
-                        ))}
-                    </div>
-                    {visibleMovies.length === 0 && (
+                        )}
+                    />
+                    {movies.length === 0 && (
                         <div className="text-center py-12 text-textMuted">
                             <p>No movies match your search or filters.</p>
+                        </div>
+                    )}
+                    {movies.length > 0 && hasMore && (
+                        <div className="py-6 text-center text-textMuted text-sm">
+                            {loadingMore ? 'Loading more movies...' : 'Scroll to load more'}
                         </div>
                     )}
                 </>
@@ -309,7 +334,7 @@ export function Library() {
                     onClose={() => setSelectedMovie(null)}
                     onNext={handleNext}
                     onPrevious={handlePrevious}
-                    hasNext={getCurrentIndex() >= 0 && getCurrentIndex() < visibleMovies.length - 1}
+                    hasNext={getCurrentIndex() >= 0 && getCurrentIndex() < movies.length - 1}
                     hasPrevious={getCurrentIndex() > 0}
                 />
             )}

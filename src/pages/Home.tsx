@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { MovieCard } from '../components/MovieCard'
 import { PlaylistCard } from '../components/PlaylistCard'
 import { HorizontalScroller } from '../components/HorizontalScroller'
@@ -6,6 +6,7 @@ import { VideoPlayer } from '../components/VideoPlayer'
 import { Movie, Playlist } from '../types'
 import { Play, Clock, Sparkles, ListVideo, MonitorPlay } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { useCoalescedIpcRefresh } from '../hooks/useCoalescedIpcRefresh'
 
 interface HomeData {
     continueWatching: (Movie & { progress: number; duration: number; last_watched: string })[]
@@ -25,9 +26,11 @@ export function Home() {
     const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null)
     const [playlistContext, setPlaylistContext] = useState<Movie[] | null>(null)
 
-    const fetchHomeData = async () => {
+    const fetchHomeData = useCallback(async () => {
         try {
-            setLoading(true)
+            if (!data) {
+                setLoading(true)
+            }
             const homeData = await window.ipcRenderer.invoke('db:get-home-data')
             setData(homeData)
             setError(null)
@@ -37,23 +40,17 @@ export function Home() {
         } finally {
             setLoading(false)
         }
-    }
+    }, [data])
+
+    const { runNow: refreshHomeData } = useCoalescedIpcRefresh(
+        fetchHomeData,
+        ['library-updated', 'playlists-updated'],
+        { delayMs: 180 }
+    )
 
     useEffect(() => {
-        fetchHomeData()
-
-        const handleUpdate = () => {
-            fetchHomeData()
-        }
-
-        window.ipcRenderer.on('library-updated', handleUpdate)
-        window.ipcRenderer.on('playlists-updated', handleUpdate)
-
-        return () => {
-            window.ipcRenderer.off('library-updated', handleUpdate)
-            window.ipcRenderer.off('playlists-updated', handleUpdate)
-        }
-    }, [])
+        void refreshHomeData()
+    }, [refreshHomeData])
 
     if (error) {
         return (
@@ -61,7 +58,9 @@ export function Home() {
                 <div className="text-center">
                     <p className="text-red-400 mb-4">Error: {error}</p>
                     <button
-                        onClick={fetchHomeData}
+                        onClick={() => {
+                            void refreshHomeData()
+                        }}
                         className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-blue-700 transition-colors"
                     >
                         Retry

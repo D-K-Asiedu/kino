@@ -5,6 +5,16 @@ import { app } from 'electron'
 // Defer database initialization until app is ready
 let db: Database.Database | null = null
 let dbPath: string | null = null
+const statementCache = new Map<string, Database.Statement>()
+
+function cachedStmt<T extends Database.Statement = Database.Statement>(sql: string): T {
+  let statement = statementCache.get(sql)
+  if (!statement) {
+    statement = getDB().prepare(sql)
+    statementCache.set(sql, statement)
+  }
+  return statement as T
+}
 
 function getDB(): Database.Database {
   if (!db) {
@@ -96,6 +106,7 @@ export function initDB() {
 
   ensureMovieColumns()
   ensurePlaybackProgressColumns()
+  ensureIndexes()
 }
 
 function ensurePlaybackProgressColumns() {
@@ -121,17 +132,126 @@ function ensureMovieColumns() {
   }
 }
 
+function ensureIndexes() {
+  getDB().exec(`
+    CREATE INDEX IF NOT EXISTS idx_movies_added_at ON movies (added_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_movies_title_nocase ON movies (title COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS idx_playlists_created_at ON playlists (created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_playlists_last_watched ON playlists (last_watched DESC);
+    CREATE INDEX IF NOT EXISTS idx_playlist_movies_movie_id ON playlist_movies (movie_id);
+    CREATE INDEX IF NOT EXISTS idx_playlist_movies_playlist_added ON playlist_movies (playlist_id, added_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_playback_progress_last_watched ON playback_progress (last_watched DESC);
+    CREATE INDEX IF NOT EXISTS idx_metadata_jobs_status_updated ON metadata_jobs (status, updated_at);
+  `)
+}
+
 export function getMovies() {
-  return getDB().prepare('SELECT * FROM movies ORDER BY added_at DESC').all()
+  return cachedStmt('SELECT * FROM movies ORDER BY added_at DESC').all()
+}
+
+interface LibraryPageQuery {
+  searchQuery?: string
+  filterBy?: string
+  sortBy?: string
+  limit?: number
+  offset?: number
+}
+
+export function getLibraryPage(query?: LibraryPageQuery) {
+  const limit = Math.max(1, Math.min(200, Number(query?.limit ?? 120)))
+  const offset = Math.max(0, Number(query?.offset ?? 0))
+  const searchQuery = String(query?.searchQuery ?? '').trim().toLowerCase()
+  const filterBy = String(query?.filterBy ?? 'all')
+  const sortBy = String(query?.sortBy ?? 'recent')
+
+  const whereClauses: string[] = []
+  const whereArgs: Array<string | number> = []
+
+  if (searchQuery) {
+    whereClauses.push('LOWER(title) LIKE ?')
+    whereArgs.push(`%${searchQuery}%`)
+  }
+
+  switch (filterBy) {
+    case 'rated':
+      whereClauses.push('rating IS NOT NULL')
+      break
+    case 'unrated':
+      whereClauses.push('rating IS NULL')
+      break
+    case 'year-2020s':
+      whereClauses.push('year >= 2020')
+      break
+    case 'year-2010s':
+      whereClauses.push('year BETWEEN 2010 AND 2019')
+      break
+    case 'year-2000s':
+      whereClauses.push('year BETWEEN 2000 AND 2009')
+      break
+    case 'year-1990s':
+      whereClauses.push('year BETWEEN 1990 AND 1999')
+      break
+    case 'year-1980s':
+      whereClauses.push('year BETWEEN 1980 AND 1989')
+      break
+    case 'year-older':
+      whereClauses.push('year < 1980')
+      break
+    default:
+      break
+  }
+
+  const orderBySql = (() => {
+    switch (sortBy) {
+      case 'title-asc':
+        return 'title COLLATE NOCASE ASC'
+      case 'title-desc':
+        return 'title COLLATE NOCASE DESC'
+      case 'year-desc':
+        return 'year DESC, added_at DESC'
+      case 'year-asc':
+        return 'year ASC, added_at DESC'
+      case 'rating-desc':
+        return 'rating DESC, added_at DESC'
+      case 'rating-asc':
+        return 'rating ASC, added_at DESC'
+      case 'recent':
+      default:
+        return 'added_at DESC'
+    }
+  })()
+
+  const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : ''
+  const countSql = `SELECT COUNT(*) as count FROM movies ${whereSql}`
+  const itemsSql = `
+    SELECT *
+    FROM movies
+    ${whereSql}
+    ORDER BY ${orderBySql}
+    LIMIT ? OFFSET ?
+  `
+
+  const total = ((getDB().prepare(countSql).get(...whereArgs) as { count: number } | undefined)?.count) ?? 0
+  const items = getDB().prepare(itemsSql).all(...whereArgs, limit, offset)
+  const nextOffset = offset + items.length
+
+  return {
+    items,
+    total,
+    limit,
+    offset,
+    hasMore: nextOffset < total,
+    nextOffset,
+  }
 }
 
 export function movieExists(filePath: string): boolean {
-  const result = getDB().prepare('SELECT 1 FROM movies WHERE file_path = ?').get(filePath)
+  const result = cachedStmt('SELECT 1 FROM movies WHERE file_path = ?').get(filePath)
   return !!result
 }
 
 export function addMovie(movie: any) {
-  const stmt = getDB().prepare(`
+  const stmt = cachedStmt(`
     INSERT OR IGNORE INTO movies (title, original_title, year, plot, poster_path, backdrop_path, rating, file_path, file_mtime, file_size)
     VALUES (@title, @original_title, @year, @plot, @poster_path, @backdrop_path, @rating, @file_path, @file_mtime, @file_size)
   `)
@@ -139,35 +259,35 @@ export function addMovie(movie: any) {
 }
 
 export function getWatchPaths() {
-  return getDB().prepare('SELECT * FROM watch_paths').all()
+  return cachedStmt('SELECT * FROM watch_paths').all()
 }
 
 export function addWatchPath(watchPath: string) {
-  const stmt = getDB().prepare('INSERT OR IGNORE INTO watch_paths (path) VALUES (?)')
+  const stmt = cachedStmt('INSERT OR IGNORE INTO watch_paths (path) VALUES (?)')
   return stmt.run(watchPath)
 }
 
 export function removeWatchPath(id: number) {
-  return getDB().prepare('DELETE FROM watch_paths WHERE id = ?').run(id)
+  return cachedStmt('DELETE FROM watch_paths WHERE id = ?').run(id)
 }
 
 export function getSetting(key: string) {
-  const row = getDB().prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined
+  const row = cachedStmt('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined
   return row ? row.value : null
 }
 
 export function setSetting(key: string, value: string) {
-  const stmt = getDB().prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+  const stmt = cachedStmt('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
   return stmt.run(key, value)
 }
 
 export function removeSetting(key: string) {
-  const stmt = getDB().prepare('DELETE FROM settings WHERE key = ?')
+  const stmt = cachedStmt('DELETE FROM settings WHERE key = ?')
   return stmt.run(key)
 }
 
 export function updateMovie(id: number | bigint, movie: any) {
-  const stmt = getDB().prepare(`
+  const stmt = cachedStmt(`
     UPDATE movies
     SET title = @title,
         original_title = @original_title,
@@ -184,11 +304,11 @@ export function updateMovie(id: number | bigint, movie: any) {
 }
 
 export function getMovieById(id: number | bigint) {
-  return getDB().prepare('SELECT * FROM movies WHERE id = ?').get(id) as any | undefined
+  return cachedStmt('SELECT * FROM movies WHERE id = ?').get(id) as any | undefined
 }
 
 export function getMovieByPath(filePath: string) {
-  return getDB().prepare('SELECT * FROM movies WHERE file_path = ?').get(filePath) as any | undefined
+  return cachedStmt('SELECT * FROM movies WHERE file_path = ?').get(filePath) as any | undefined
 }
 
 export function getMoviesByWatchPath(watchPath: string) {
@@ -202,7 +322,7 @@ export function getMoviesByWatchPath(watchPath: string) {
 
 export function removeMovieByPath(filePath: string) {
   console.log('Database: Attempting to remove movie with path:', filePath)
-  const result = getDB().prepare('DELETE FROM movies WHERE file_path = ?').run(filePath)
+  const result = cachedStmt('DELETE FROM movies WHERE file_path = ?').run(filePath)
   console.log('Database: Removal result:', result)
   return result
 }
@@ -224,7 +344,7 @@ export function removeMoviesByWatchPath(watchPath: string) {
 }
 
 export function enqueueMetadataJob(movieId: number | bigint, force = false) {
-  const stmt = getDB().prepare(`
+  const stmt = cachedStmt(`
     INSERT INTO metadata_jobs (movie_id, status, attempts, force, updated_at)
     VALUES (?, 'pending', 0, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(movie_id) DO UPDATE SET
@@ -238,7 +358,7 @@ export function enqueueMetadataJob(movieId: number | bigint, force = false) {
 
 export function claimNextMetadataJob() {
   const claim = getDB().transaction(() => {
-    const job = getDB().prepare(`
+    const job = cachedStmt(`
       SELECT * FROM metadata_jobs
       WHERE status = 'pending'
       ORDER BY updated_at ASC
@@ -247,7 +367,7 @@ export function claimNextMetadataJob() {
 
     if (!job) return undefined
 
-    getDB().prepare(`
+    cachedStmt(`
       UPDATE metadata_jobs
       SET status = 'running', attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
       WHERE movie_id = ?
@@ -260,11 +380,11 @@ export function claimNextMetadataJob() {
 }
 
 export function completeMetadataJob(movieId: number | bigint) {
-  return getDB().prepare('DELETE FROM metadata_jobs WHERE movie_id = ?').run(movieId)
+  return cachedStmt('DELETE FROM metadata_jobs WHERE movie_id = ?').run(movieId)
 }
 
 export function failMetadataJob(movieId: number | bigint, error: string) {
-  return getDB().prepare(`
+  return cachedStmt(`
     UPDATE metadata_jobs
     SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP
     WHERE movie_id = ?
@@ -272,7 +392,7 @@ export function failMetadataJob(movieId: number | bigint, error: string) {
 }
 
 export function resetRunningMetadataJobs() {
-  return getDB().prepare(`
+  return cachedStmt(`
     UPDATE metadata_jobs
     SET status = 'pending', updated_at = CURRENT_TIMESTAMP
     WHERE status = 'running'
@@ -280,7 +400,7 @@ export function resetRunningMetadataJobs() {
 }
 
 export function getWatchPathById(id: number) {
-  return getDB().prepare('SELECT * FROM watch_paths WHERE id = ?').get(id) as { id: number; path: string } | undefined
+  return cachedStmt('SELECT * FROM watch_paths WHERE id = ?').get(id) as { id: number; path: string } | undefined
 }
 
 // Playlist functions
@@ -294,47 +414,47 @@ export function ensurePlaylistColumns() {
 }
 
 export function createPlaylist(name: string) {
-  return getDB().prepare('INSERT INTO playlists (name) VALUES (?)').run(name)
+  return cachedStmt('INSERT INTO playlists (name) VALUES (?)').run(name)
 }
 
 export function getPlaylists() {
-  return getDB().prepare('SELECT * FROM playlists ORDER BY created_at DESC').all()
+  return cachedStmt('SELECT * FROM playlists ORDER BY created_at DESC').all()
 }
 
 export function updatePlaylistLastWatched(id: number) {
-  const stmt = getDB().prepare('UPDATE playlists SET last_watched = CURRENT_TIMESTAMP WHERE id = ?')
+  const stmt = cachedStmt('UPDATE playlists SET last_watched = CURRENT_TIMESTAMP WHERE id = ?')
   return stmt.run(id)
 }
 
 export function getPlaylistById(id: number) {
-  return getDB().prepare('SELECT * FROM playlists WHERE id = ?').get(id) as { id: number; name: string; created_at: string } | undefined
+  return cachedStmt('SELECT * FROM playlists WHERE id = ?').get(id) as { id: number; name: string; created_at: string } | undefined
 }
 
 export function deletePlaylist(id: number) {
-  return getDB().prepare('DELETE FROM playlists WHERE id = ?').run(id)
+  return cachedStmt('DELETE FROM playlists WHERE id = ?').run(id)
 }
 
 // Deleted folder playlists tracking (prevents auto-regeneration)
 export function markFolderPlaylistDeleted(folderName: string) {
-  return getDB().prepare('INSERT OR REPLACE INTO deleted_folder_playlists (folder_name) VALUES (?)').run(folderName)
+  return cachedStmt('INSERT OR REPLACE INTO deleted_folder_playlists (folder_name) VALUES (?)').run(folderName)
 }
 
 export function isFolderPlaylistDeleted(folderName: string): boolean {
-  const result = getDB().prepare('SELECT 1 FROM deleted_folder_playlists WHERE folder_name = ?').get(folderName)
+  const result = cachedStmt('SELECT 1 FROM deleted_folder_playlists WHERE folder_name = ?').get(folderName)
   return !!result
 }
 
 export function clearDeletedFolderPlaylist(folderName: string) {
-  return getDB().prepare('DELETE FROM deleted_folder_playlists WHERE folder_name = ?').run(folderName)
+  return cachedStmt('DELETE FROM deleted_folder_playlists WHERE folder_name = ?').run(folderName)
 }
 
 export function getAllDeletedFolderPlaylists(): string[] {
-  const rows = getDB().prepare('SELECT folder_name FROM deleted_folder_playlists').all() as { folder_name: string }[]
+  const rows = cachedStmt('SELECT folder_name FROM deleted_folder_playlists').all() as { folder_name: string }[]
   return rows.map(r => r.folder_name)
 }
 
 export function deleteEmptyPlaylists() {
-  const result = getDB().prepare(`
+  const result = cachedStmt(`
     DELETE FROM playlists 
     WHERE id NOT IN (SELECT DISTINCT playlist_id FROM playlist_movies)
   `).run()
@@ -345,15 +465,15 @@ export function deleteEmptyPlaylists() {
 }
 
 export function addMovieToPlaylist(playlistId: number, movieId: number) {
-  return getDB().prepare('INSERT OR IGNORE INTO playlist_movies (playlist_id, movie_id) VALUES (?, ?)').run(playlistId, movieId)
+  return cachedStmt('INSERT OR IGNORE INTO playlist_movies (playlist_id, movie_id) VALUES (?, ?)').run(playlistId, movieId)
 }
 
 export function removeMovieFromPlaylist(playlistId: number, movieId: number) {
-  return getDB().prepare('DELETE FROM playlist_movies WHERE playlist_id = ? AND movie_id = ?').run(playlistId, movieId)
+  return cachedStmt('DELETE FROM playlist_movies WHERE playlist_id = ? AND movie_id = ?').run(playlistId, movieId)
 }
 
 export function getPlaylistMovies(playlistId: number) {
-  return getDB().prepare(`
+  return cachedStmt(`
     SELECT m.*, pm.added_at as playlist_added_at
     FROM movies m
     JOIN playlist_movies pm ON m.id = pm.movie_id
@@ -364,7 +484,7 @@ export function getPlaylistMovies(playlistId: number) {
 
 // Secure items
 export function addSecureItem(item: any) {
-  const stmt = getDB().prepare(`
+  const stmt = cachedStmt(`
     INSERT INTO secure_items (title, original_title, year, plot, poster_path, backdrop_path, rating, original_name, encrypted_path)
     VALUES (@title, @original_title, @year, @plot, @poster_path, @backdrop_path, @rating, @original_name, @encrypted_path)
   `)
@@ -372,28 +492,32 @@ export function addSecureItem(item: any) {
 }
 
 export function getSecureItems() {
-  return getDB().prepare('SELECT * FROM secure_items ORDER BY added_at DESC').all()
+  return cachedStmt('SELECT * FROM secure_items ORDER BY added_at DESC').all()
 }
 
 export function getSecureItemById(id: number) {
-  return getDB().prepare('SELECT * FROM secure_items WHERE id = ?').get(id) as any | undefined
+  return cachedStmt('SELECT * FROM secure_items WHERE id = ?').get(id) as any | undefined
+}
+
+export function updateSecureItemPosterPath(id: number, posterPath: string | null) {
+  return cachedStmt('UPDATE secure_items SET poster_path = ? WHERE id = ?').run(posterPath, id)
 }
 
 export function deleteSecureItem(id: number) {
-  return getDB().prepare('DELETE FROM secure_items WHERE id = ?').run(id)
+  return cachedStmt('DELETE FROM secure_items WHERE id = ?').run(id)
 }
 
 export function deleteSecureItemByPath(encryptedPath: string) {
-  return getDB().prepare('DELETE FROM secure_items WHERE encrypted_path = ?').run(encryptedPath)
+  return cachedStmt('DELETE FROM secure_items WHERE encrypted_path = ?').run(encryptedPath)
 }
 
 export function deleteAllSecureItems() {
-  return getDB().prepare('DELETE FROM secure_items').run()
+  return cachedStmt('DELETE FROM secure_items').run()
 }
 
 // Playback Progress functions
 export function updatePlaybackProgress(movieId: number, progress: number, duration: number = 0) {
-  const stmt = getDB().prepare(`
+  const stmt = cachedStmt(`
     INSERT OR REPLACE INTO playback_progress (movie_id, progress, duration, last_watched)
     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
   `)
@@ -401,13 +525,80 @@ export function updatePlaybackProgress(movieId: number, progress: number, durati
 }
 
 export function getPlaybackProgress(movieId: number) {
-  const row = getDB().prepare('SELECT progress FROM playback_progress WHERE movie_id = ?').get(movieId) as { progress: number } | undefined
+  const row = cachedStmt('SELECT progress FROM playback_progress WHERE movie_id = ?').get(movieId) as { progress: number } | undefined
   return row ? row.progress : 0
+}
+
+function getRotatingSlice(table: 'movies' | 'playlists', limit: number) {
+  const countSql = table === 'movies'
+    ? 'SELECT COUNT(*) as count FROM movies'
+    : 'SELECT COUNT(*) as count FROM playlists'
+  const listSql = table === 'movies'
+    ? 'SELECT * FROM movies ORDER BY id ASC LIMIT ? OFFSET ?'
+    : 'SELECT * FROM playlists ORDER BY id ASC LIMIT ? OFFSET ?'
+
+  const total = (cachedStmt(countSql).get() as { count: number } | undefined)?.count ?? 0
+  if (total <= 0) return []
+
+  // Rotate hourly for variety without expensive ORDER BY RANDOM scans.
+  const seed = Math.floor(Date.now() / (60 * 60 * 1000))
+  const offset = total > limit ? seed % total : 0
+  const primary = cachedStmt(listSql).all(limit, offset) as any[]
+  if (primary.length >= limit || primary.length >= total) return primary
+
+  const remaining = limit - primary.length
+  const wrap = cachedStmt(table === 'movies'
+    ? 'SELECT * FROM movies ORDER BY id ASC LIMIT ?'
+    : 'SELECT * FROM playlists ORDER BY id ASC LIMIT ?').all(remaining) as any[]
+  return primary.concat(wrap)
+}
+
+function getPlaylistPreviewMovieMap(playlistIds: number[]) {
+  const uniqueIds = [...new Set(playlistIds)].filter((id) => Number.isFinite(id))
+  const previewMap = new Map<number, any[]>()
+  if (uniqueIds.length === 0) return previewMap
+
+  const placeholders = uniqueIds.map(() => '?').join(', ')
+  const rows = getDB().prepare(`
+    WITH ranked AS (
+      SELECT
+        pm.playlist_id,
+        pm.added_at as playlist_added_at,
+        m.*,
+        ROW_NUMBER() OVER (PARTITION BY pm.playlist_id ORDER BY pm.added_at DESC) as rn
+      FROM playlist_movies pm
+      JOIN movies m ON m.id = pm.movie_id
+      WHERE pm.playlist_id IN (${placeholders})
+    )
+    SELECT * FROM ranked
+    WHERE rn <= 4
+    ORDER BY playlist_id, playlist_added_at DESC
+  `).all(...uniqueIds) as any[]
+
+  for (const row of rows) {
+    const playlistId = Number(row.playlist_id)
+    const { playlist_id: _playlistId, rn: _rn, ...movie } = row
+    const current = previewMap.get(playlistId)
+    if (current) {
+      current.push(movie)
+    } else {
+      previewMap.set(playlistId, [movie])
+    }
+  }
+
+  return previewMap
+}
+
+function withPlaylistPreviewMovies(playlists: any[], previewMap: Map<number, any[]>) {
+  return playlists.map((playlist) => ({
+    ...playlist,
+    movies: previewMap.get(Number(playlist.id)) ?? []
+  }))
 }
 
 // Home Page Data
 export function getHomeData() {
-  const continueWatching = getDB().prepare(`
+  const continueWatching = cachedStmt(`
     SELECT m.*, p.progress, p.duration, p.last_watched 
     FROM movies m 
     JOIN playback_progress p ON m.id = p.movie_id 
@@ -415,17 +606,13 @@ export function getHomeData() {
     LIMIT 10
   `).all()
 
-  const recentlyAdded = getDB().prepare(`
+  const recentlyAdded = cachedStmt(`
     SELECT * FROM movies 
     ORDER BY added_at DESC 
     LIMIT 10
   `).all()
 
-  const randomSuggestions = getDB().prepare(`
-    SELECT * FROM movies 
-    ORDER BY RANDOM() 
-    LIMIT 6
-  `).all()
+  const randomSuggestions = getRotatingSlice('movies', 6)
 
   const lastWatchedPlaylistIdSetting = getSetting('last_watched_playlist_id')
   let lastWatchedPlaylist = null
@@ -443,49 +630,35 @@ export function getHomeData() {
     }
   }
 
-  // Helper to fetch playlists with up to 4 movies for thumbnails
-  const fetchPlaylistsWithMovies = (query: string) => {
-    const playlists = getDB().prepare(query).all() as any[]
-    return playlists.map(playlist => {
-      const movies = getDB().prepare(`
-        SELECT m.*
-        FROM movies m
-        JOIN playlist_movies pm ON m.id = pm.movie_id
-        WHERE pm.playlist_id = ?
-        ORDER BY pm.added_at DESC
-        LIMIT 4
-      `).all(playlist.id)
-      return { ...playlist, movies }
-    })
-  }
-
-  const recentlyWatchedPlaylists = fetchPlaylistsWithMovies(`
+  const recentlyWatchedPlaylists = cachedStmt(`
     SELECT * FROM playlists 
     WHERE last_watched IS NOT NULL 
     ORDER BY last_watched DESC 
     LIMIT 10
-  `)
+  `).all() as any[]
 
-  const latestPlaylists = fetchPlaylistsWithMovies(`
+  const latestPlaylists = cachedStmt(`
     SELECT * FROM playlists 
     ORDER BY created_at DESC 
     LIMIT 10
-  `)
+  `).all() as any[]
 
-  const recommendedPlaylists = fetchPlaylistsWithMovies(`
-    SELECT * FROM playlists 
-    ORDER BY RANDOM() 
-    LIMIT 10
-  `)
+  const recommendedPlaylists = getRotatingSlice('playlists', 10) as any[]
+  const allPlaylistIds = [
+    ...recentlyWatchedPlaylists.map((playlist) => Number(playlist.id)),
+    ...latestPlaylists.map((playlist) => Number(playlist.id)),
+    ...recommendedPlaylists.map((playlist) => Number(playlist.id)),
+  ]
+  const previewMap = getPlaylistPreviewMovieMap(allPlaylistIds)
 
   return {
     continueWatching,
     recentlyAdded,
     randomSuggestions,
     lastWatchedPlaylist,
-    recentlyWatchedPlaylists,
-    latestPlaylists,
-    recommendedPlaylists
+    recentlyWatchedPlaylists: withPlaylistPreviewMovies(recentlyWatchedPlaylists, previewMap),
+    latestPlaylists: withPlaylistPreviewMovies(latestPlaylists, previewMap),
+    recommendedPlaylists: withPlaylistPreviewMovies(recommendedPlaylists, previewMap)
   }
 }
 

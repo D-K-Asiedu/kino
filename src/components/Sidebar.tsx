@@ -2,8 +2,9 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { Film, Settings, MonitorPlay, ListMusic, Plus, Trash2, RefreshCw, Lock, Home } from 'lucide-react'
 import { clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Playlist } from '../types'
+import { useCoalescedIpcRefresh } from '../hooks/useCoalescedIpcRefresh'
 
 export function Sidebar() {
     const location = useLocation()
@@ -12,24 +13,20 @@ export function Sidebar() {
     const [isCreating, setIsCreating] = useState(false)
     const [newPlaylistName, setNewPlaylistName] = useState('')
 
-    const fetchPlaylists = async () => {
+    const fetchPlaylists = useCallback(async () => {
         const data = await window.ipcRenderer.invoke('db:get-playlists')
         setPlaylists(data)
-    }
+    }, [])
+
+    const { runNow: refreshPlaylists } = useCoalescedIpcRefresh(
+        fetchPlaylists,
+        ['playlists-updated'],
+        { delayMs: 150 }
+    )
 
     useEffect(() => {
-        fetchPlaylists()
-
-        const handlePlaylistUpdate = () => {
-            fetchPlaylists()
-        }
-
-        window.ipcRenderer.on('playlists-updated', handlePlaylistUpdate)
-
-        return () => {
-            window.ipcRenderer.off('playlists-updated', handlePlaylistUpdate)
-        }
-    }, [])
+        void refreshPlaylists()
+    }, [refreshPlaylists])
 
     const handleCreatePlaylist = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -38,7 +35,7 @@ export function Sidebar() {
         await window.ipcRenderer.invoke('db:create-playlist', newPlaylistName)
         setNewPlaylistName('')
         setIsCreating(false)
-        fetchPlaylists()
+        void refreshPlaylists()
     }
 
     const handleDeletePlaylist = async (e: React.MouseEvent, id: number) => {
@@ -46,7 +43,7 @@ export function Sidebar() {
         e.stopPropagation()
         if (confirm('Are you sure you want to delete this playlist?')) {
             await window.ipcRenderer.invoke('db:delete-playlist', id)
-            fetchPlaylists()
+            void refreshPlaylists()
             if (location.pathname === `/playlists/${id}`) {
                 navigate('/')
             }
@@ -57,7 +54,7 @@ export function Sidebar() {
         if (confirm('Generate playlists from folders? This will group movies by their parent directory.')) {
             const result = await window.ipcRenderer.invoke('db:generate-default-playlists')
             alert(`Created ${result.created} playlists and added ${result.added} movies.`)
-            fetchPlaylists()
+            void refreshPlaylists()
         }
     }
 

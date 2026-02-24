@@ -11,7 +11,7 @@ function App() {
         <HashRouter>
             <div className="flex h-screen bg-background text-text overflow-hidden">
                 <Sidebar />
-                <main className="flex-1 overflow-y-auto relative">
+                <main id="app-scroll-root" className="flex-1 overflow-y-auto relative">
                     <Routes>
                         <Route path="/" element={<Home />} />
                         <Route path="/library" element={<Library />} />

@@ -11,8 +11,11 @@ let watcher: FSWatcher | null = null
 const MAX_METADATA_CONCURRENCY = 2
 let metadataWorkers = 0
 let libraryUpdateTimer: NodeJS.Timeout | null = null
+let playlistUpdateTimer: NodeJS.Timeout | null = null
 let suppressLibraryUpdates = false
+let suppressPlaylistUpdates = false
 let pendingLibraryUpdate = false
+let pendingPlaylistUpdate = false
 let metadataUpdatePending = false
 
 const VIDEO_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv']
@@ -53,7 +56,20 @@ export function startWatcher() {
 async function syncLibrary() {
     console.log('Watcher: Syncing library...')
     const movies = db.getMovies()
+    const knownMoviePaths = new Set((movies as any[]).map((movie) => movie.file_path as string))
     const watchPaths = db.getWatchPaths().map((row: any) => row.path)
+    suppressLibraryUpdates = true
+    suppressPlaylistUpdates = true
+    if (libraryUpdateTimer) {
+        clearTimeout(libraryUpdateTimer)
+        libraryUpdateTimer = null
+        pendingLibraryUpdate = true
+    }
+    if (playlistUpdateTimer) {
+        clearTimeout(playlistUpdateTimer)
+        playlistUpdateTimer = null
+        pendingPlaylistUpdate = true
+    }
 
     // 1. Check for removed files
     let removedCount = 0
@@ -81,9 +97,10 @@ async function syncLibrary() {
                 } else if (entry.isFile()) {
                     const ext = path.extname(fullPath).toLowerCase()
                     if (VIDEO_EXTENSIONS.includes(ext)) {
-                        if (!db.movieExists(fullPath)) {
+                        if (!knownMoviePaths.has(fullPath)) {
                             console.log('Watcher: Found new file during sync:', fullPath)
-                            handleFileAdd(fullPath)
+                            knownMoviePaths.add(fullPath)
+                            handleFileAdd(fullPath, { skipExistsCheck: true })
                             addedCount++
                         }
                     }
@@ -94,11 +111,19 @@ async function syncLibrary() {
         }
     }
 
-    suppressLibraryUpdates = true
     for (const p of watchPaths) {
         await scanDirectory(p)
     }
     suppressLibraryUpdates = false
+    suppressPlaylistUpdates = false
+    if (pendingLibraryUpdate) {
+        pendingLibraryUpdate = false
+        scheduleLibraryUpdate()
+    }
+    if (pendingPlaylistUpdate) {
+        pendingPlaylistUpdate = false
+        schedulePlaylistUpdate()
+    }
 
     // 3. Check for missing thumbnails
     let thumbnailGenCount = 0
@@ -120,19 +145,11 @@ async function syncLibrary() {
         }
     })
 
-    const playlistResult = generateDefaultPlaylists()
-    const playlistUpdated = playlistResult.created > 0 || playlistResult.added > 0
-
     if (addedCount > 0 || removedCount > 0 || thumbnailGenCount > 0) {
         console.log(`Watcher: Sync complete. Removed ${removedCount}, Added ${addedCount}, Generating thumbnails for ${thumbnailGenCount}.`)
         scheduleLibraryUpdate()
     } else {
         console.log('Watcher: Sync complete. No changes.')
-    }
-
-    if (playlistUpdated) {
-        console.log(`Watcher: Playlist sync generated ${playlistResult.created} playlists and added ${playlistResult.added} entries.`)
-        notifyRenderer('playlists-updated')
     }
 }
 
@@ -144,10 +161,10 @@ export function triggerMetadataProcessing() {
     void processMetadataQueue()
 }
 
-function handleFileAdd(filePath: string) {
+function handleFileAdd(filePath: string, options?: { skipExistsCheck?: boolean }) {
     console.log('Watcher: File add event detected for:', filePath)
     // Check if already exists
-    if (db.movieExists(filePath)) {
+    if (!options?.skipExistsCheck && db.movieExists(filePath)) {
         console.log('Watcher: File already exists in DB, skipping:', filePath)
         return
     }
@@ -175,10 +192,7 @@ function handleFileAdd(filePath: string) {
 
         // Fetch metadata in background
         enqueueMetadataJob(info.lastInsertRowid)
-
-        // Auto-generate playlists
-        generateDefaultPlaylists()
-        notifyRenderer('playlists-updated')
+        schedulePlaylistUpdate()
 
     } catch (err) {
         console.error('Failed to add movie:', err)
@@ -194,12 +208,8 @@ function handleFileRemove(filePath: string) {
         if (movie?.id) {
             void deleteThumbnailForMovie(movie.id)
         }
-
-        // Cleanup empty playlists
-        db.deleteEmptyPlaylists()
-
         scheduleLibraryUpdate()
-        notifyRenderer('playlists-updated')
+        schedulePlaylistUpdate()
     } catch (err) {
         console.error('Watcher: Failed to remove movie:', err)
     }
@@ -241,6 +251,23 @@ function scheduleLibraryUpdate() {
             pendingLibraryUpdate = false
         }
         notifyRenderer('library-updated')
+    }, 250)
+}
+
+function schedulePlaylistUpdate() {
+    if (suppressPlaylistUpdates) {
+        pendingPlaylistUpdate = true
+        return
+    }
+
+    if (playlistUpdateTimer) return
+    playlistUpdateTimer = setTimeout(() => {
+        playlistUpdateTimer = null
+        const result = generateDefaultPlaylists()
+        if (result.created > 0 || result.added > 0) {
+            console.log(`Watcher: Playlist sync generated ${result.created} playlists and added ${result.added} entries.`)
+        }
+        notifyRenderer('playlists-updated')
     }, 250)
 }
 

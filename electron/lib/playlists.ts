@@ -16,7 +16,12 @@ interface Playlist {
 export function generateDefaultPlaylists() {
     const movies = db.getMovies() as Movie[]
     const playlists = db.getPlaylists() as Playlist[]
-    const playlistMap = new Map(playlists.map(p => [p.name, p.id]))
+    const playlistMap = new Map<string, number>()
+    for (const playlist of playlists) {
+        if (!playlistMap.has(playlist.name)) {
+            playlistMap.set(playlist.name, playlist.id)
+        }
+    }
     
     // Get list of folder names that user has explicitly deleted
     const deletedFolders = new Set(db.getAllDeletedFolderPlaylists())
@@ -37,40 +42,41 @@ export function generateDefaultPlaylists() {
     let createdCount = 0
     let addedCount = 0
 
-    // Create playlists and add movies
-    for (const [folderName, group] of groupedMovies) {
-        // Skip if folder has only 1 movie (optional, but good for noise reduction)
-        if (group.length < 2) continue
-        
-        // Skip if user has explicitly deleted this folder's playlist
-        if (deletedFolders.has(folderName)) {
-            console.log(`Skipping deleted folder playlist: ${folderName}`)
-            continue
-        }
+    const tx = db.getDB().transaction(() => {
+        // Create playlists and add movies
+        for (const [folderName, group] of groupedMovies) {
+            // Skip if folder has only 1 movie (optional, but good for noise reduction)
+            if (group.length < 2) continue
 
-        let playlistId = playlistMap.get(folderName)
+            // Skip if user has explicitly deleted this folder's playlist
+            if (deletedFolders.has(folderName)) {
+                continue
+            }
 
-        if (!playlistId) {
-            db.createPlaylist(folderName)
-            // Re-fetch to get ID (a bit inefficient but safe)
-            const newPlaylist = (db.getPlaylists() as Playlist[]).find(p => p.name === folderName)
-            if (newPlaylist) {
-                playlistId = newPlaylist.id
-                playlistMap.set(folderName, playlistId)
-                createdCount++
+            let playlistId = playlistMap.get(folderName)
+
+            if (!playlistId) {
+                const created = db.createPlaylist(folderName)
+                if (created.changes > 0) {
+                    playlistId = Number(created.lastInsertRowid)
+                    playlistMap.set(folderName, playlistId)
+                    createdCount++
+                }
+            }
+
+            if (playlistId) {
+                for (const movie of group) {
+                    const result = db.addMovieToPlaylist(playlistId, movie.id)
+                    addedCount += result.changes
+                }
             }
         }
 
-        if (playlistId) {
-            for (const movie of group) {
-                db.addMovieToPlaylist(playlistId, movie.id)
-                addedCount++
-            }
-        }
-    }
+        // Cleanup any empty playlists that might exist
+        db.deleteEmptyPlaylists()
+    })
 
-    // Cleanup any empty playlists that might exist
-    db.deleteEmptyPlaylists()
+    tx()
 
     return { created: createdCount, added: addedCount }
 }

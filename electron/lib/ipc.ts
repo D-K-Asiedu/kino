@@ -26,6 +26,7 @@ function notifyRenderer(channel: string, data?: any) {
 
 export function registerIPC() {
     ipcMain.handle('db:get-library', () => db.getMovies())
+    ipcMain.handle('db:get-library-page', (_, query) => db.getLibraryPage(query))
     ipcMain.handle('db:add-movie', (_, movie) => db.addMovie(movie))
     ipcMain.handle('db:get-watch-paths', () => db.getWatchPaths())
     ipcMain.handle('db:add-watch-path', (_, path) => db.addWatchPath(path))

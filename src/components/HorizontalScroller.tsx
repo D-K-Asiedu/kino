@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react'
+import { useRef, useState, useEffect, useCallback } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 interface HorizontalScrollerProps {
@@ -8,44 +8,60 @@ interface HorizontalScrollerProps {
 
 export function HorizontalScroller({ children, className = '' }: HorizontalScrollerProps) {
     const scrollContainerRef = useRef<HTMLDivElement>(null)
+    const rafRef = useRef<number | null>(null)
     const [showLeftArrow, setShowLeftArrow] = useState(false)
     const [showRightArrow, setShowRightArrow] = useState(false)
-    // Add a state to trigger re-renders to ensure we catch late-loading content width changes
-    const [contentWidthChanged, setContentWidthChanged] = useState(0)
 
-    const checkScrollCapabilities = () => {
+    const checkScrollCapabilities = useCallback(() => {
         if (!scrollContainerRef.current) return
 
         const { scrollLeft, scrollWidth, clientWidth } = scrollContainerRef.current
 
         // Use a small epsilon (1px) to account for floating point pixel rounding
-        setShowLeftArrow(scrollLeft > 1)
-        setShowRightArrow(scrollLeft < scrollWidth - clientWidth - 1)
-    }
+        const canScrollLeft = scrollLeft > 1
+        const canScrollRight = scrollLeft < scrollWidth - clientWidth - 1
+        setShowLeftArrow(prev => (prev === canScrollLeft ? prev : canScrollLeft))
+        setShowRightArrow(prev => (prev === canScrollRight ? prev : canScrollRight))
+    }, [])
 
-    // Set up ResizeObserver to handle dynamic content loading
+    const scheduleScrollCheck = useCallback(() => {
+        if (rafRef.current !== null) {
+            cancelAnimationFrame(rafRef.current)
+        }
+        rafRef.current = requestAnimationFrame(() => {
+            rafRef.current = null
+            checkScrollCapabilities()
+        })
+    }, [checkScrollCapabilities])
+
+    // Track container size and direct child list changes without observing every card node.
     useEffect(() => {
         if (!scrollContainerRef.current) return
 
-        const resizeObserver = new ResizeObserver(() => {
-            setContentWidthChanged(prev => prev + 1)
-        })
+        const container = scrollContainerRef.current
+        const resizeObserver = new ResizeObserver(scheduleScrollCheck)
+        const mutationObserver = new MutationObserver(scheduleScrollCheck)
+        const handleLoad = () => scheduleScrollCheck()
+        resizeObserver.observe(container)
+        mutationObserver.observe(container, { childList: true })
+        container.addEventListener('load', handleLoad, true)
+        scheduleScrollCheck()
 
-        resizeObserver.observe(scrollContainerRef.current)
-        // Also observe the children container directly if possible, or just re-check
-        Array.from(scrollContainerRef.current.children).forEach(child => {
-            resizeObserver.observe(child)
-        })
+        return () => {
+            resizeObserver.disconnect()
+            mutationObserver.disconnect()
+            container.removeEventListener('load', handleLoad, true)
+            if (rafRef.current !== null) {
+                cancelAnimationFrame(rafRef.current)
+                rafRef.current = null
+            }
+        }
+    }, [scheduleScrollCheck])
 
-        return () => resizeObserver.disconnect()
-    }, [children])
-
-    // Checking separately whenever resize happens or component updates
+    // Run another check when React children update to catch layout changes after paint.
     useEffect(() => {
-        checkScrollCapabilities()
-        // Wait a frame and check again to ensure layout is settled
-        requestAnimationFrame(checkScrollCapabilities)
-    }, [contentWidthChanged, children])
+        scheduleScrollCheck()
+    }, [children, scheduleScrollCheck])
 
     const scroll = (direction: 'left' | 'right') => {
         if (scrollContainerRef.current) {
@@ -78,7 +94,7 @@ export function HorizontalScroller({ children, className = '' }: HorizontalScrol
             {/* Scroll Container */}
             <div
                 ref={scrollContainerRef}
-                onScroll={checkScrollCapabilities}
+                onScroll={scheduleScrollCheck}
                 className={`flex gap-6 overflow-x-auto pb-6 snap-x snap-mandatory no-scrollbar ${className}`}
             >
                 {children}

@@ -126,8 +126,6 @@ app.whenReady().then(async () => {
       const url = request.url.replace('media://', '')
       const filePath = decodeURIComponent(url)
 
-      console.log('Media request:', { url, filePath })
-
       try {
         const stats = await fs.promises.stat(filePath)
         const fileSize = stats.size

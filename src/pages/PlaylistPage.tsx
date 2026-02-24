@@ -1,9 +1,11 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { Movie, Playlist } from '../types'
 import { MovieCard } from '../components/MovieCard'
 import { VideoPlayer } from '../components/VideoPlayer'
+import { VirtualMovieGrid } from '../components/VirtualMovieGrid'
 import { Trash2, Film, SlidersHorizontal, ArrowUpDown, ChevronDown, Check } from 'lucide-react'
+import { useCoalescedIpcRefresh } from '../hooks/useCoalescedIpcRefresh'
 
 export function PlaylistPage() {
     const { id } = useParams<{ id: string }>()
@@ -18,9 +20,11 @@ export function PlaylistPage() {
     const filterMenuRef = useRef<HTMLDivElement | null>(null)
     const sortMenuRef = useRef<HTMLDivElement | null>(null)
 
-    const fetchPlaylistData = async () => {
+    const fetchPlaylistData = useCallback(async () => {
         if (!id) return
-        setLoading(true)
+        if (!playlist) {
+            setLoading(true)
+        }
         try {
             // We need to get playlist details first. 
             // Currently we don't have a direct "get playlist by id" but we can filter from all playlists
@@ -39,23 +43,17 @@ export function PlaylistPage() {
         } finally {
             setLoading(false)
         }
-    }
+    }, [id, playlist])
+
+    const { runNow: refreshPlaylistData } = useCoalescedIpcRefresh(
+        fetchPlaylistData,
+        ['playlists-updated', 'library-updated'],
+        { delayMs: 170 }
+    )
 
     useEffect(() => {
-        fetchPlaylistData()
-
-        const handleUpdate = () => {
-            fetchPlaylistData()
-        }
-
-        window.ipcRenderer.on('playlists-updated', handleUpdate)
-        window.ipcRenderer.on('library-updated', handleUpdate) // Also listen for library updates as they might affect playlist content
-
-        return () => {
-            window.ipcRenderer.off('playlists-updated', handleUpdate)
-            window.ipcRenderer.off('library-updated', handleUpdate)
-        }
-    }, [id])
+        void refreshPlaylistData()
+    }, [id, refreshPlaylistData])
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -77,7 +75,7 @@ export function PlaylistPage() {
 
         if (confirm('Remove this movie from playlist?')) {
             await window.ipcRenderer.invoke('db:remove-movie-from-playlist', playlist.id, movieId)
-            fetchPlaylistData()
+            void refreshPlaylistData()
         }
     }
 
@@ -292,9 +290,11 @@ export function PlaylistPage() {
                 </div>
             </header>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                {visibleMovies.map((movie) => (
-                    <div key={movie.id} className="relative group">
+            <VirtualMovieGrid
+                items={visibleMovies}
+                getItemKey={(movie) => movie.id}
+                renderItem={(movie) => (
+                    <div className="relative group">
                         <MovieCard
                             movie={movie}
                             onClick={() => handlePlayMovie(movie)}
@@ -307,8 +307,8 @@ export function PlaylistPage() {
                             <Trash2 className="w-4 h-4" />
                         </button>
                     </div>
-                ))}
-            </div>
+                )}
+            />
 
             {movies.length === 0 && (
                 <div className="text-center py-12 text-textMuted">

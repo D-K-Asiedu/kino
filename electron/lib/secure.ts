@@ -8,6 +8,7 @@ import { generateThumbnailToPath } from './scraper'
 
 const VAULT_DIR = () => path.join(app.getPath('userData'), 'secure-vault')
 const CACHE_DIR = () => path.join(app.getPath('temp'), 'kino-secure-cache')
+const THUMB_VAULT_DIR = () => path.join(VAULT_DIR(), 'thumbnails')
 const LOG_PATH = () => path.join(app.getPath('userData'), 'kino-debug.log')
 
 const MAGIC = Buffer.from('KINOSEC1')
@@ -24,6 +25,19 @@ const SETTINGS_KEYS = {
 
 let unlockedKey: Buffer | null = null
 const cachePaths = new Set<string>()
+const PLAYBACK_CACHE_TTL_MS = 2 * 60 * 1000
+
+type PlaybackCacheEntry = {
+  itemId: number
+  tempPath: string
+  refs: number
+  evictTimer: ReturnType<typeof setTimeout> | null
+}
+
+const playbackCacheByItem = new Map<number, PlaybackCacheEntry>()
+const playbackCacheByPath = new Map<string, PlaybackCacheEntry>()
+const playbackPrepareInFlight = new Map<number, Promise<{ tempPath: string }>>()
+const thumbnailInFlight = new Map<number, Promise<string>>()
 
 function logSecure(message: string, error?: unknown) {
   const timestamp = new Date().toISOString()
@@ -57,6 +71,7 @@ function hasPassword() {
 
 function ensureVaultDirs() {
   fs.ensureDirSync(VAULT_DIR())
+  fs.ensureDirSync(THUMB_VAULT_DIR())
   fs.ensureDirSync(CACHE_DIR())
 }
 
@@ -174,6 +189,18 @@ export function unlockSecure(password: string) {
 
 export async function lockSecure() {
   unlockedKey = null
+  thumbnailInFlight.clear()
+  playbackPrepareInFlight.clear()
+
+  for (const entry of playbackCacheByItem.values()) {
+    if (entry.evictTimer) {
+      clearTimeout(entry.evictTimer)
+      entry.evictTimer = null
+    }
+  }
+  playbackCacheByItem.clear()
+  playbackCacheByPath.clear()
+
   for (const p of cachePaths) {
     try {
       await fs.promises.unlink(p)
@@ -215,10 +242,12 @@ export async function importMovieToSecure(movie: any) {
   const encryptedPath = path.join(VAULT_DIR(), encryptedName)
 
   const originalName = path.basename(sourcePath)
+  let encryptedThumbnailPath: string | null = null
 
   try {
     logSecure(`Encrypting file: ${sourcePath}`)
     await encryptFile(sourcePath, encryptedPath, unlockedKey)
+    encryptedThumbnailPath = await createEncryptedSecureThumbnail(sourcePath)
 
     await deleteLibraryThumbnail(movie)
 
@@ -227,7 +256,7 @@ export async function importMovieToSecure(movie: any) {
       original_title: movie.original_title,
       year: movie.year,
       plot: movie.plot,
-      poster_path: null,
+      poster_path: encryptedThumbnailPath,
       backdrop_path: movie.backdrop_path,
       rating: movie.rating,
       original_name: originalName,
@@ -240,6 +269,9 @@ export async function importMovieToSecure(movie: any) {
   } catch (err) {
     db.deleteSecureItemByPath(encryptedPath)
     await fs.promises.unlink(encryptedPath).catch(() => undefined)
+    if (encryptedThumbnailPath) {
+      await fs.promises.unlink(encryptedThumbnailPath).catch(() => undefined)
+    }
     logSecure(`Import failed for: ${sourcePath}`, err)
     throw err
   }
@@ -265,25 +297,65 @@ export async function prepareSecurePlayback(itemId: number) {
   const item = db.getSecureItemById(itemId)
   if (!item) throw new Error('Secure item not found')
 
-  const ext = path.extname(item.original_name || '') || '.mp4'
-  const safeName = `${item.id}-${Date.now()}${ext}`
-  const tempPath = path.join(CACHE_DIR(), safeName)
+  const cachedEntry = playbackCacheByItem.get(itemId)
+  if (cachedEntry && await existsNonEmpty(cachedEntry.tempPath)) {
+    retainPlaybackCacheEntry(cachedEntry)
+    logSecure(`Reused secure playback cache: ${cachedEntry.tempPath}`)
+    return { tempPath: cachedEntry.tempPath }
+  }
+  if (cachedEntry) {
+    await deletePlaybackCacheEntry(cachedEntry)
+  }
 
-  await decryptFile(item.encrypted_path, tempPath, unlockedKey)
-  cachePaths.add(tempPath)
+  const inFlight = playbackPrepareInFlight.get(itemId)
+  if (inFlight) {
+    return inFlight
+  }
 
-  logSecure(`Prepared secure playback: ${tempPath}`)
-  return { tempPath }
+  const task = (async () => {
+    const ext = path.extname(item.original_name || '') || '.mp4'
+    const safeName = `${item.id}-${Date.now()}${ext}`
+    const tempPath = path.join(CACHE_DIR(), safeName)
+
+    await decryptFile(item.encrypted_path, tempPath, unlockedKey)
+    cachePaths.add(tempPath)
+
+    const entry: PlaybackCacheEntry = {
+      itemId,
+      tempPath,
+      refs: 1,
+      evictTimer: null
+    }
+    playbackCacheByItem.set(itemId, entry)
+    playbackCacheByPath.set(tempPath, entry)
+
+    logSecure(`Prepared secure playback: ${tempPath}`)
+    return { tempPath }
+  })()
+
+  playbackPrepareInFlight.set(itemId, task)
+  try {
+    return await task
+  } finally {
+    playbackPrepareInFlight.delete(itemId)
+  }
 }
 
 export async function releaseSecurePlayback(tempPath: string) {
   if (!tempPath) return
-  cachePaths.delete(tempPath)
-  try {
-    await fs.promises.unlink(tempPath)
-  } catch {
-    // ignore
+  const entry = playbackCacheByPath.get(tempPath)
+  if (!entry) {
+    cachePaths.delete(tempPath)
+    try {
+      await fs.promises.unlink(tempPath)
+    } catch {
+      // ignore
+    }
+    return
   }
+
+  entry.refs = Math.max(0, entry.refs - 1)
+  schedulePlaybackEviction(entry)
 }
 
 export async function deleteSecureItem(itemId: number) {
@@ -291,7 +363,11 @@ export async function deleteSecureItem(itemId: number) {
   const item = db.getSecureItemById(itemId)
   if (!item) return
 
+  await deletePlaybackCacheForItem(itemId)
   await fs.promises.unlink(item.encrypted_path).catch(() => undefined)
+  if (item.poster_path) {
+    await fs.promises.unlink(item.poster_path).catch(() => undefined)
+  }
   db.deleteSecureItem(itemId)
   await deleteCachedThumbnail(itemId)
 }
@@ -307,28 +383,67 @@ export async function getSecureThumbnail(itemId: number) {
     return cached
   }
 
-  const item = db.getSecureItemById(itemId)
-  if (!item) throw new Error('Secure item not found')
+  const pending = thumbnailInFlight.get(itemId)
+  if (pending) {
+    return pending
+  }
 
-  const ext = path.extname(item.original_name || '') || '.mp4'
-  const tempVideoName = `${item.id}-${Date.now()}-${Math.random().toString(16).slice(2)}${ext}`
-  const tempVideoPath = path.join(CACHE_DIR(), tempVideoName)
-  const thumbnailPath = path.join(CACHE_DIR(), `thumb-${item.id}.jpg`)
+  const task = (async () => {
+    const item = db.getSecureItemById(itemId)
+    if (!item) throw new Error('Secure item not found')
 
-  await decryptFile(item.encrypted_path, tempVideoPath, unlockedKey)
-  cachePaths.add(tempVideoPath)
+    const thumbnailPath = path.join(CACHE_DIR(), `thumb-${item.id}.jpg`)
 
-  try {
-    const posterPath = await generateThumbnailToPath(tempVideoPath, thumbnailPath, undefined, { force: true })
-    if (!posterPath) {
-      throw new Error('Thumbnail generation failed')
+    if (item.poster_path && await existsNonEmpty(item.poster_path)) {
+      try {
+        await decryptFile(item.poster_path, thumbnailPath, unlockedKey)
+        cachePaths.add(thumbnailPath)
+        thumbnailCache.set(itemId, thumbnailPath)
+        return thumbnailPath
+      } catch (err) {
+        logSecure(`Failed to decrypt secure thumbnail for item ${itemId}; regenerating`, err)
+        db.updateSecureItemPosterPath(itemId, null)
+        await fs.remove(item.poster_path).catch(() => undefined)
+      }
     }
-    cachePaths.add(thumbnailPath)
-    thumbnailCache.set(itemId, posterPath)
-    return posterPath
+
+    const ext = path.extname(item.original_name || '') || '.mp4'
+    const tempVideoName = `${item.id}-${Date.now()}-${Math.random().toString(16).slice(2)}${ext}`
+    const tempVideoPath = path.join(CACHE_DIR(), tempVideoName)
+
+    await decryptFile(item.encrypted_path, tempVideoPath, unlockedKey)
+    cachePaths.add(tempVideoPath)
+
+    try {
+      const posterPath = await generateThumbnailToPath(tempVideoPath, thumbnailPath, undefined, { force: true })
+      if (!posterPath) {
+        throw new Error('Thumbnail generation failed')
+      }
+
+      cachePaths.add(thumbnailPath)
+      thumbnailCache.set(itemId, posterPath)
+
+      try {
+        const encryptedThumbnailPath = await encryptExistingThumbnail(posterPath)
+        if (encryptedThumbnailPath) {
+          db.updateSecureItemPosterPath(itemId, encryptedThumbnailPath)
+        }
+      } catch (err) {
+        logSecure(`Failed to persist secure thumbnail for item ${itemId}`, err)
+      }
+
+      return posterPath
+    } finally {
+      cachePaths.delete(tempVideoPath)
+      await fs.remove(tempVideoPath).catch(() => undefined)
+    }
+  })()
+
+  thumbnailInFlight.set(itemId, task)
+  try {
+    return await task
   } finally {
-    cachePaths.delete(tempVideoPath)
-    await fs.remove(tempVideoPath).catch(() => undefined)
+    thumbnailInFlight.delete(itemId)
   }
 }
 
@@ -338,6 +453,76 @@ async function deleteCachedThumbnail(itemId: number | bigint) {
     thumbnailCache.delete(Number(itemId))
     await fs.remove(cached).catch(() => undefined)
   }
+}
+
+function retainPlaybackCacheEntry(entry: PlaybackCacheEntry) {
+  if (entry.evictTimer) {
+    clearTimeout(entry.evictTimer)
+    entry.evictTimer = null
+  }
+  entry.refs += 1
+}
+
+function schedulePlaybackEviction(entry: PlaybackCacheEntry) {
+  if (entry.refs > 0) return
+  if (entry.evictTimer) return
+
+  entry.evictTimer = setTimeout(() => {
+    void deletePlaybackCacheEntry(entry)
+  }, PLAYBACK_CACHE_TTL_MS)
+}
+
+async function deletePlaybackCacheForItem(itemId: number) {
+  const entry = playbackCacheByItem.get(itemId)
+  if (!entry) return
+  await deletePlaybackCacheEntry(entry)
+}
+
+async function deletePlaybackCacheEntry(entry: PlaybackCacheEntry) {
+  if (entry.evictTimer) {
+    clearTimeout(entry.evictTimer)
+    entry.evictTimer = null
+  }
+
+  playbackCacheByItem.delete(entry.itemId)
+  playbackCacheByPath.delete(entry.tempPath)
+  cachePaths.delete(entry.tempPath)
+  await fs.remove(entry.tempPath).catch(() => undefined)
+}
+
+async function createEncryptedSecureThumbnail(videoPath: string) {
+  if (!unlockedKey) return null
+
+  const tempThumbPath = path.join(
+    CACHE_DIR(),
+    `secure-import-thumb-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`
+  )
+
+  try {
+    const generated = await generateThumbnailToPath(videoPath, tempThumbPath, undefined, { force: true })
+    if (!generated || !await existsNonEmpty(generated)) {
+      return null
+    }
+    return await encryptExistingThumbnail(generated)
+  } catch (err) {
+    logSecure(`Failed to pre-generate secure thumbnail for ${videoPath}`, err)
+    return null
+  } finally {
+    await fs.remove(tempThumbPath).catch(() => undefined)
+  }
+}
+
+async function encryptExistingThumbnail(thumbnailPath: string) {
+  if (!unlockedKey) return null
+  if (!await existsNonEmpty(thumbnailPath)) return null
+
+  const encryptedThumbnailPath = path.join(
+    THUMB_VAULT_DIR(),
+    `${crypto.randomBytes(16).toString('hex')}.bin`
+  )
+
+  await encryptFile(thumbnailPath, encryptedThumbnailPath, unlockedKey)
+  return encryptedThumbnailPath
 }
 
 async function existsNonEmpty(filePath: string) {

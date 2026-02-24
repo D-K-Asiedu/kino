@@ -43,6 +43,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const videoRef = useRef<HTMLVideoElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
     const controlsTimeoutRef = useRef<NodeJS.Timeout>()
+    const lastUiTimeRef = useRef(0)
+    const subtitleObjectUrlRef = useRef<string | null>(null)
 
     // State
     const [isPlaying, setIsPlaying] = useState(true)
@@ -78,6 +80,13 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
     // Up Next Overlay State
     const [showUpNext, setShowUpNext] = useState(false)
+
+    const revokeSubtitleObjectUrl = useCallback(() => {
+        if (subtitleObjectUrlRef.current) {
+            URL.revokeObjectURL(subtitleObjectUrlRef.current)
+            subtitleObjectUrlRef.current = null
+        }
+    }, [])
 
     // Initialize volume from localStorage
     useEffect(() => {
@@ -119,8 +128,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             if (document.pictureInPictureElement) {
                 document.exitPictureInPicture().catch(() => undefined)
             }
+            revokeSubtitleObjectUrl()
         }
-    }, [])
+    }, [revokeSubtitleObjectUrl])
 
     // Helper: Format time (seconds -> MM:SS)
     const formatTime = (time: number) => {
@@ -161,6 +171,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 const progress = await window.ipcRenderer.invoke('db:get-playback-progress', movie.id)
                 if (progress && progress > 5) { // Only resume if watched more than 5 seconds
                     setSavedProgress(progress)
+                    lastUiTimeRef.current = progress
                     // Seek to the saved point so the user sees where they left off
                     if (videoRef.current) {
                         videoRef.current.currentTime = progress
@@ -177,12 +188,14 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     }, [movie.id, disableProgress])
 
     useEffect(() => {
+        lastUiTimeRef.current = 0
         setCurrentTime(0)
         setDuration(0)
         setSavedProgress(null)
         setShowResumePrompt(false)
         setAudioTracks([])
         setTextTracks([])
+        revokeSubtitleObjectUrl()
         if (videoRef.current) {
             const existingTracks = videoRef.current.querySelectorAll('track')
             existingTracks.forEach(t => {
@@ -199,7 +212,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
             videoRef.current.currentTime = 0
         }
-    }, [movie.id])
+    }, [movie.id, revokeSubtitleObjectUrl])
 
     useEffect(() => {
         if (videoRef.current) {
@@ -247,6 +260,19 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         }
     }, [currentTime, duration, hasNext, hasPrevious])
 
+    const handleTimeUpdate = useCallback(() => {
+        const video = videoRef.current
+        if (!video) return
+
+        const time = video.currentTime
+        const prev = lastUiTimeRef.current
+        const nearEnd = duration > 0 && duration - time < 0.25
+        if (Math.abs(time - prev) >= 0.25 || time === 0 || nearEnd) {
+            lastUiTimeRef.current = time
+            setCurrentTime(time)
+        }
+    }, [duration])
+
     // Video Actions
     const togglePlay = () => {
         if (videoRef.current) {
@@ -265,6 +291,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         const time = parseFloat(e.target.value)
         if (videoRef.current) {
             videoRef.current.currentTime = time
+            lastUiTimeRef.current = time
             setCurrentTime(time)
         }
     }
@@ -468,6 +495,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 trackEl.src = url
                 trackEl.default = true
                 videoRef.current.appendChild(trackEl)
+                revokeSubtitleObjectUrl()
+                subtitleObjectUrlRef.current = url
 
                 // Update state
                 const newTracks = trackList.map((t, i) => ({
@@ -502,6 +531,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             const newTracks = textTracks.map(t => ({ ...t, mode: 'hidden' }))
             setTextTracks(newTracks as any)
         }
+        revokeSubtitleObjectUrl()
         removeStoredValue(STORAGE_KEYS.subtitle)
         setSettingsTab('main')
     }
@@ -509,6 +539,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const handleResume = () => {
         if (videoRef.current && savedProgress) {
             videoRef.current.currentTime = savedProgress
+            lastUiTimeRef.current = savedProgress
             setCurrentTime(savedProgress)
             setIsPlaying(true)
             videoRef.current.play()
@@ -519,6 +550,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const handleRestart = () => {
         if (videoRef.current) {
             videoRef.current.currentTime = 0
+            lastUiTimeRef.current = 0
             setCurrentTime(0)
             setIsPlaying(true)
             videoRef.current.play()
@@ -825,7 +857,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                     className="w-full h-full object-contain"
                     autoPlay
                     src={`media://${encodeURIComponent(movie.file_path)}`}
-                    onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
+                    onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={handleLoadedMetadata}
                     onPlay={() => {
                         setIsPlaying(true)
