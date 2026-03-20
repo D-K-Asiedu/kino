@@ -43,8 +43,12 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const videoRef = useRef<HTMLVideoElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
     const controlsTimeoutRef = useRef<NodeJS.Timeout>()
+    const bufferingTimeoutRef = useRef<NodeJS.Timeout>()
     const lastUiTimeRef = useRef(0)
     const subtitleObjectUrlRef = useRef<string | null>(null)
+    const pendingSeekTimeRef = useRef<number | null>(null)
+    const isScrubbingRef = useRef(false)
+    const suppressBufferingUntilRef = useRef(0)
 
     // State
     const [isPlaying, setIsPlaying] = useState(true)
@@ -77,6 +81,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
     // Time Display State
     const [showRemainingTime, setShowRemainingTime] = useState(false)
+    const [isScrubbing, setIsScrubbing] = useState(false)
 
     // Up Next Overlay State
     const [showUpNext, setShowUpNext] = useState(false)
@@ -87,6 +92,44 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             subtitleObjectUrlRef.current = null
         }
     }, [])
+
+    const clearBufferingTimeout = useCallback(() => {
+        if (bufferingTimeoutRef.current) {
+            clearTimeout(bufferingTimeoutRef.current)
+            bufferingTimeoutRef.current = undefined
+        }
+    }, [])
+
+    const hideBufferingIndicator = useCallback(() => {
+        clearBufferingTimeout()
+        setIsBuffering(false)
+    }, [clearBufferingTimeout])
+
+    const performSeek = useCallback((time: number) => {
+        const video = videoRef.current
+        if (!video || !Number.isFinite(time)) return
+
+        const clampedTime = duration > 0 ? Math.max(0, Math.min(time, duration)) : Math.max(0, time)
+        const seekableVideo = video as HTMLVideoElement & { fastSeek?: (seekTime: number) => void }
+
+        // Treat user seeks as expected stalls; don't flash the spinner immediately.
+        suppressBufferingUntilRef.current = Date.now() + 400
+        hideBufferingIndicator()
+
+        try {
+            if (typeof seekableVideo.fastSeek === 'function') {
+                seekableVideo.fastSeek(clampedTime)
+            } else {
+                video.currentTime = clampedTime
+            }
+        } catch {
+            video.currentTime = clampedTime
+        }
+
+        pendingSeekTimeRef.current = clampedTime
+        lastUiTimeRef.current = clampedTime
+        setCurrentTime(clampedTime)
+    }, [duration, hideBufferingIndicator])
 
     // Initialize volume from localStorage
     useEffect(() => {
@@ -128,9 +171,10 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             if (document.pictureInPictureElement) {
                 document.exitPictureInPicture().catch(() => undefined)
             }
+            clearBufferingTimeout()
             revokeSubtitleObjectUrl()
         }
-    }, [revokeSubtitleObjectUrl])
+    }, [clearBufferingTimeout, revokeSubtitleObjectUrl])
 
     // Helper: Format time (seconds -> MM:SS)
     const formatTime = (time: number) => {
@@ -263,6 +307,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const handleTimeUpdate = useCallback(() => {
         const video = videoRef.current
         if (!video) return
+        if (isScrubbingRef.current) return
 
         const time = video.currentTime
         const prev = lastUiTimeRef.current
@@ -289,16 +334,38 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
     const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
         const time = parseFloat(e.target.value)
-        if (videoRef.current) {
-            videoRef.current.currentTime = time
-            lastUiTimeRef.current = time
-            setCurrentTime(time)
+        if (!Number.isFinite(time)) return
+
+        pendingSeekTimeRef.current = time
+        lastUiTimeRef.current = time
+        setCurrentTime(time)
+
+        // Keyboard adjustments on the range input should still seek immediately.
+        if (!isScrubbingRef.current) {
+            performSeek(time)
+        }
+    }
+
+    const beginScrubSeek = () => {
+        isScrubbingRef.current = true
+        setIsScrubbing(true)
+        hideBufferingIndicator()
+    }
+
+    const commitScrubSeek = () => {
+        if (!isScrubbingRef.current) return
+
+        isScrubbingRef.current = false
+        setIsScrubbing(false)
+
+        if (pendingSeekTimeRef.current !== null) {
+            performSeek(pendingSeekTimeRef.current)
         }
     }
 
     const skip = (seconds: number) => {
         if (videoRef.current) {
-            videoRef.current.currentTime += seconds
+            performSeek(videoRef.current.currentTime + seconds)
             setClickFeedback(seconds > 0 ? 'forward' : 'rewind')
             setTimeout(() => setClickFeedback(null), 500)
         }
@@ -861,12 +928,34 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                     onLoadedMetadata={handleLoadedMetadata}
                     onPlay={() => {
                         setIsPlaying(true)
-                        setIsBuffering(false)
+                        hideBufferingIndicator()
                     }}
-                    onPause={() => setIsPlaying(false)}
-                    onEnded={() => setIsPlaying(false)}
-                    onWaiting={() => setIsBuffering(true)}
-                    onPlaying={() => setIsBuffering(false)}
+                    onPause={() => {
+                        setIsPlaying(false)
+                        hideBufferingIndicator()
+                    }}
+                    onEnded={() => {
+                        setIsPlaying(false)
+                        hideBufferingIndicator()
+                    }}
+                    onWaiting={() => {
+                        if (isScrubbingRef.current || Date.now() < suppressBufferingUntilRef.current) {
+                            return
+                        }
+
+                        clearBufferingTimeout()
+                        bufferingTimeoutRef.current = setTimeout(() => {
+                            if (isScrubbingRef.current) return
+                            if (Date.now() < suppressBufferingUntilRef.current) return
+                            setIsBuffering(true)
+                        }, 200)
+                    }}
+                    onPlaying={hideBufferingIndicator}
+                    onSeeked={() => {
+                        // A short grace period prevents spinner flash on successful seeks.
+                        suppressBufferingUntilRef.current = Date.now() + 150
+                        hideBufferingIndicator()
+                    }}
                 />
             </div>
 
@@ -1013,8 +1102,16 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                         type="range"
                         min="0"
                         max={duration}
-                        value={currentTime}
+                        value={isScrubbing ? (pendingSeekTimeRef.current ?? currentTime) : currentTime}
                         onChange={handleSeek}
+                        onPointerDown={beginScrubSeek}
+                        onPointerUp={commitScrubSeek}
+                        onPointerCancel={commitScrubSeek}
+                        onMouseDown={beginScrubSeek}
+                        onMouseUp={commitScrubSeek}
+                        onTouchStart={beginScrubSeek}
+                        onTouchEnd={commitScrubSeek}
+                        onBlur={commitScrubSeek}
                         className="absolute inset-0 w-full h-full opacity-0 z-20 cursor-pointer"
                     />
                     <div className="w-full h-1 bg-white/20 rounded-full overflow-hidden group-hover/progress:h-2 transition-all">
