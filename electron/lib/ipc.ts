@@ -127,6 +127,16 @@ export function registerIPC() {
         triggerMetadataProcessing()
         return { queued: 1 }
     })
+    ipcMain.handle('media:get-playback-info', async (_, filePath) => {
+        const { getPlaybackInfo } = await import('./streaming')
+        return getPlaybackInfo(filePath)
+    })
+
+    ipcMain.handle('media:stop-streams', async () => {
+        const { stopAllStreams } = await import('./streaming')
+        stopAllStreams()
+    })
+
     ipcMain.handle('media:get-metadata', async (_, filePath) => {
         const { getMediaMetadata } = await import('./ffmpeg')
         return getMediaMetadata(filePath)

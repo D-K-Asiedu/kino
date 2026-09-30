@@ -6,6 +6,7 @@ import { initDB } from './lib/database'
 import { registerIPC } from './lib/ipc'
 import { startWatcher } from './lib/watcher'
 import { generateDefaultPlaylists } from './lib/playlists'
+import { handleStreamRequest, stopAllStreams } from './lib/streaming'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -60,6 +61,16 @@ protocol.registerSchemesAsPrivileged([
       bypassCSP: true,
       stream: true
     }
+  },
+  {
+    // On-the-fly conversion for videos Chromium can't decode (HEVC, AC3/E-AC3 audio, ...)
+    scheme: 'kino-stream',
+    privileges: {
+      secure: true,
+      supportFetchAPI: true,
+      bypassCSP: true,
+      stream: true
+    }
   }
 ])
 
@@ -103,6 +114,10 @@ function createWindow() {
     win.loadFile(path.join(RENDERER_DIST, 'index.html'))
   }
 }
+
+app.on('before-quit', () => {
+  stopAllStreams()
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -178,6 +193,7 @@ app.whenReady().then(async () => {
         return new Response('Not Found', { status: 404 })
       }
     })
+    protocol.handle('kino-stream', handleStreamRequest)
     writeLog('INFO', 'Media protocol handler registered')
 
     try {

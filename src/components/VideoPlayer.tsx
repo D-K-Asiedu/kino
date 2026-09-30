@@ -68,6 +68,45 @@ const removeStoredValue = (key: string) => {
     window.localStorage.removeItem(key)
 }
 
+interface PlaybackInfo {
+    mode: 'direct' | 'transcode'
+    duration: number
+    copyVideo: boolean
+    reason: string | null
+}
+
+interface ActiveSubtitle {
+    vtt: string
+    label: string
+    language: string
+}
+
+const VTT_TIMESTAMP = /(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})/g
+
+const formatVttTimestamp = (seconds: number) => {
+    const totalMs = Math.max(0, Math.round(seconds * 1000))
+    const h = Math.floor(totalMs / 3600000)
+    const m = Math.floor((totalMs % 3600000) / 60000)
+    const s = Math.floor((totalMs % 60000) / 1000)
+    const ms = totalMs % 1000
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`
+}
+
+/** Shift every cue earlier by offsetSeconds, so cues line up with a stream that starts mid-file. */
+const shiftVttCues = (vtt: string, offsetSeconds: number) => {
+    if (offsetSeconds <= 0) return vtt
+    return vtt
+        .split('\n')
+        .map(line => {
+            if (!line.includes('-->')) return line
+            return line.replace(VTT_TIMESTAMP, (_match, h, m, sec, ms) => {
+                const value = Number(h ?? 0) * 3600 + Number(m) * 60 + Number(sec) + Number(ms) / 1000
+                return formatVttTimestamp(value - offsetSeconds)
+            })
+        })
+        .join('\n')
+}
+
 export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPrevious, disableProgress, startMode = 'prompt' }: VideoPlayerProps) {
     const videoRef = useRef<HTMLVideoElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
@@ -83,6 +122,18 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const effectiveVolumeRef = useRef(1)
     // Only the first movie honours startMode; next/previous episodes use the normal prompt.
     const startModeRef = useRef(startMode)
+    // Converted streams (see electron/lib/streaming.ts) restart at the seek position, so the
+    // element's currentTime is relative to streamOffsetRef. Direct playback always has offset 0.
+    const isTranscodeRef = useRef(false)
+    const streamOffsetRef = useRef(0)
+    const audioStreamIndexRef = useRef<number | null>(null)
+    const activeSubtitleRef = useRef<ActiveSubtitle | null>(null)
+    // Direct playback: position to seek to once metadata has loaded (resume point).
+    const pendingStartTimeRef = useRef(0)
+    // While a new stream loads the element reports paused, so remember whether playback should
+    // continue once it's ready (null = no stream load pending).
+    const pendingPlayIntentRef = useRef<boolean | null>(null)
+    const tracksLoadedForMovieRef = useRef<number | null>(null)
 
     // State
     const [isPlaying, setIsPlaying] = useState(true)
@@ -101,6 +152,10 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     })
     const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([])
     const [textTracks, setTextTracks] = useState<TextTrack[]>([])
+    const [playbackInfo, setPlaybackInfo] = useState<PlaybackInfo | null>(null)
+    const [videoSrc, setVideoSrc] = useState<string | undefined>(undefined)
+    const [autoPlayEnabled, setAutoPlayEnabled] = useState(true)
+    const [playbackError, setPlaybackError] = useState<string | null>(null)
 
     // Settings Menu State
     const [showSettings, setShowSettings] = useState(false)
@@ -146,6 +201,67 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         setIsBuffering(false)
     }, [clearBufferingTimeout])
 
+    /** Position in the movie (seconds), accounting for converted streams that start mid-file. */
+    const getAbsoluteTime = useCallback(() => {
+        const video = videoRef.current
+        if (!video) return 0
+        return (isTranscodeRef.current ? streamOffsetRef.current : 0) + video.currentTime
+    }, [])
+
+    const buildStreamUrl = useCallback((start: number, audioStreamIndex: number | null) => {
+        const params = new URLSearchParams({
+            path: movie.file_path,
+            start: start.toFixed(3),
+            audio: audioStreamIndex === null ? '' : String(audioStreamIndex),
+        })
+        return `kino-stream://play/?${params.toString()}`
+    }, [movie.file_path])
+
+    /** (Re)attach the selected subtitle, shifted to match the current stream offset. */
+    const attachActiveSubtitle = useCallback(() => {
+        const video = videoRef.current
+        const subtitle = activeSubtitleRef.current
+        if (!video) return
+
+        video.querySelectorAll('track').forEach(t => t.remove())
+        revokeSubtitleObjectUrl()
+        if (!subtitle) return
+
+        const offset = isTranscodeRef.current ? streamOffsetRef.current : 0
+        const url = URL.createObjectURL(new Blob([shiftVttCues(subtitle.vtt, offset)], { type: 'text/vtt' }))
+        const trackEl = document.createElement('track')
+        trackEl.kind = 'subtitles'
+        trackEl.label = subtitle.label
+        trackEl.srclang = subtitle.language
+        trackEl.src = url
+        trackEl.default = true
+        video.appendChild(trackEl)
+        subtitleObjectUrlRef.current = url
+
+        setTimeout(() => {
+            if (trackEl.track) {
+                trackEl.track.mode = 'showing'
+            }
+        }, 100)
+    }, [revokeSubtitleObjectUrl])
+
+    /** Whether the user expects playback to be running (true while a paused-looking stream is loading). */
+    const isPlaybackIntended = useCallback(() => {
+        return pendingPlayIntentRef.current ?? !(videoRef.current?.paused ?? true)
+    }, [])
+
+    /** Converted playback: start a new stream at `time` (seconds into the movie). */
+    const startStreamAt = useCallback((time: number, play: boolean) => {
+        pendingPlayIntentRef.current = play
+        streamOffsetRef.current = Math.max(0, time)
+        setAutoPlayEnabled(play)
+        setPlaybackError(null)
+        setVideoSrc(buildStreamUrl(streamOffsetRef.current, audioStreamIndexRef.current))
+        lastUiTimeRef.current = streamOffsetRef.current
+        setCurrentTime(streamOffsetRef.current)
+        if (activeSubtitleRef.current) attachActiveSubtitle()
+    }, [attachActiveSubtitle, buildStreamUrl])
+
     const performSeek = useCallback((time: number) => {
         const video = videoRef.current
         if (!video || !Number.isFinite(time)) return
@@ -156,6 +272,30 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         // Treat user seeks as expected stalls; don't flash the spinner immediately.
         suppressBufferingUntilRef.current = Date.now() + 400
         hideBufferingIndicator()
+
+        if (isTranscodeRef.current) {
+            // A converted stream can only seek within what has already arrived; anything else
+            // restarts the conversion at the target position.
+            const relative = clampedTime - streamOffsetRef.current
+            const { buffered } = video
+            let isBuffered = false
+            for (let i = 0; i < buffered.length; i++) {
+                if (relative >= buffered.start(i) - 0.5 && relative <= buffered.end(i)) {
+                    isBuffered = true
+                    break
+                }
+            }
+            if (isBuffered) {
+                video.currentTime = Math.max(0, relative)
+                pendingSeekTimeRef.current = clampedTime
+                lastUiTimeRef.current = clampedTime
+                setCurrentTime(clampedTime)
+            } else {
+                pendingSeekTimeRef.current = clampedTime
+                startStreamAt(clampedTime, isPlaybackIntended())
+            }
+            return
+        }
 
         try {
             if (typeof seekableVideo.fastSeek === 'function') {
@@ -170,7 +310,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         pendingSeekTimeRef.current = clampedTime
         lastUiTimeRef.current = clampedTime
         setCurrentTime(clampedTime)
-    }, [duration, hideBufferingIndicator])
+    }, [duration, hideBufferingIndicator, startStreamAt, isPlaybackIntended])
 
     // Initialize volume from localStorage
     useEffect(() => {
@@ -248,41 +388,76 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         }
     }, [isPlaying, showSettings, showControlsHandler])
 
-    // Playback Tracking
+    // Load source: decide between direct playback and on-the-fly conversion, and where to start.
     useEffect(() => {
-        const loadProgress = async () => {
+        let cancelled = false
+
+        const init = async () => {
+            setPlaybackError(null)
+            setPlaybackInfo(null)
+            setVideoSrc(undefined)
+
+            let info: PlaybackInfo = { mode: 'direct', duration: 0, copyVideo: true, reason: null }
             try {
-                if (disableProgress) return
-                const progress = await window.ipcRenderer.invoke('db:get-playback-progress', movie.id)
-                const mode = startModeRef.current
-                startModeRef.current = 'prompt'
-                if (mode === 'restart') return
-                if (mode === 'resume' && progress && progress > 5) {
-                    lastUiTimeRef.current = progress
-                    setCurrentTime(progress)
-                    if (videoRef.current) {
-                        videoRef.current.currentTime = progress
-                        void videoRef.current.play().catch(() => undefined)
-                    }
-                    return
-                }
-                if (progress && progress > 5) { // Only resume if watched more than 5 seconds
-                    setSavedProgress(progress)
-                    lastUiTimeRef.current = progress
-                    // Seek to the saved point so the user sees where they left off
-                    if (videoRef.current) {
-                        videoRef.current.currentTime = progress
-                        videoRef.current.pause()
-                    }
-                    setShowResumePrompt(true)
-                    setIsPlaying(false) // Pause initially
-                }
+                info = await window.ipcRenderer.invoke('media:get-playback-info', movie.file_path)
             } catch (err) {
-                console.error('Failed to load playback progress:', err)
+                console.error('Failed to probe media, trying direct playback:', err)
+            }
+
+            let progress = 0
+            if (!disableProgress) {
+                try {
+                    progress = Number(await window.ipcRenderer.invoke('db:get-playback-progress', movie.id)) || 0
+                } catch (err) {
+                    console.error('Failed to load playback progress:', err)
+                }
+            }
+            if (cancelled) return
+
+            const mode = startModeRef.current
+            startModeRef.current = 'prompt'
+            // Only resume if watched more than 5 seconds
+            const startAt = progress > 5 && mode !== 'restart' ? progress : 0
+            const showPrompt = startAt > 0 && mode === 'prompt'
+
+            isTranscodeRef.current = info.mode === 'transcode'
+            streamOffsetRef.current = 0
+            audioStreamIndexRef.current = null
+            pendingStartTimeRef.current = 0
+            setPlaybackInfo(info)
+            if (info.duration > 0) setDuration(info.duration)
+
+            if (showPrompt) {
+                // Show the frame where the user left off, paused, behind the prompt
+                setSavedProgress(progress)
+                setShowResumePrompt(true)
+                setIsPlaying(false)
+            }
+            setAutoPlayEnabled(!showPrompt)
+            lastUiTimeRef.current = startAt
+            setCurrentTime(startAt)
+
+            if (info.mode === 'transcode') {
+                streamOffsetRef.current = startAt
+                setVideoSrc(buildStreamUrl(startAt, null))
+            } else {
+                pendingStartTimeRef.current = startAt
+                setVideoSrc(`media://${encodeURIComponent(movie.file_path)}`)
             }
         }
-        loadProgress()
-    }, [movie.id, disableProgress])
+
+        void init()
+        return () => {
+            cancelled = true
+        }
+    }, [movie.id, movie.file_path, disableProgress, buildStreamUrl])
+
+    // Stop any running conversion when the player closes
+    useEffect(() => {
+        return () => {
+            void window.ipcRenderer.invoke('media:stop-streams').catch(() => undefined)
+        }
+    }, [])
 
     useEffect(() => {
         lastUiTimeRef.current = 0
@@ -292,6 +467,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         setShowResumePrompt(false)
         setAudioTracks([])
         setTextTracks([])
+        activeSubtitleRef.current = null
+        tracksLoadedForMovieRef.current = null
         revokeSubtitleObjectUrl()
         if (videoRef.current) {
             const existingTracks = videoRef.current.querySelectorAll('track')
@@ -306,23 +483,23 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             for (let i = 0; i < textTrackList.length; i++) {
                 textTrackList[i].mode = 'disabled'
             }
-
-            videoRef.current.currentTime = 0
         }
     }, [movie.id, revokeSubtitleObjectUrl])
 
     useEffect(() => {
         if (videoRef.current) {
+            // Loading a new source resets playbackRate to defaultPlaybackRate, so set both.
+            videoRef.current.defaultPlaybackRate = playbackRate
             videoRef.current.playbackRate = playbackRate
         }
-    }, [movie.id, playbackRate])
+    }, [movie.id, playbackRate, videoSrc])
 
     // Save progress periodically
     useEffect(() => {
         const interval = setInterval(() => {
             if (disableProgress) return
             if (isPlaying && videoRef.current) {
-                const time = videoRef.current.currentTime
+                const time = getAbsoluteTime()
                 if (time > 5 && duration > 0 && time < duration - 10) { // Don't save if at start or very end
                     window.ipcRenderer.invoke('db:update-playback-progress', movie.id, time, duration)
                 }
@@ -330,20 +507,20 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         }, 5000)
 
         return () => clearInterval(interval)
-    }, [isPlaying, movie.id, duration, disableProgress])
+    }, [isPlaying, movie.id, duration, disableProgress, getAbsoluteTime])
 
     // Save on unmount
     useEffect(() => {
         return () => {
             if (disableProgress) return
             if (videoRef.current) {
-                const time = videoRef.current.currentTime
+                const time = getAbsoluteTime()
                 if (time > 5) {
                     window.ipcRenderer.invoke('db:update-playback-progress', movie.id, time, duration)
                 }
             }
         }
-    }, [movie.id, duration, disableProgress])
+    }, [movie.id, duration, disableProgress, getAbsoluteTime])
 
     // Show up next overlay when video is 90% complete
     useEffect(() => {
@@ -362,17 +539,20 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         if (!video) return
         if (isScrubbingRef.current) return
 
-        const time = video.currentTime
+        const time = getAbsoluteTime()
         const prev = lastUiTimeRef.current
         const nearEnd = duration > 0 && duration - time < 0.25
         if (Math.abs(time - prev) >= 0.25 || time === 0 || nearEnd) {
             lastUiTimeRef.current = time
             setCurrentTime(time)
         }
-    }, [duration])
+    }, [duration, getAbsoluteTime])
 
     // Video Actions
     const togglePlay = () => {
+        // An explicit play/pause overrides whatever a pending stream load intended.
+        pendingPlayIntentRef.current = null
+        setAutoPlayEnabled(true)
         if (videoRef.current) {
             if (videoRef.current.paused) {
                 videoRef.current.play()
@@ -418,7 +598,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
     const skip = (seconds: number) => {
         if (videoRef.current) {
-            performSeek(videoRef.current.currentTime + seconds)
+            performSeek(getAbsoluteTime() + seconds)
             setClickFeedback(seconds > 0 ? 'forward' : 'rewind')
             setTimeout(() => setClickFeedback(null), 500)
         }
@@ -499,13 +679,28 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         setPlaybackRate(rate)
         setStoredValue(STORAGE_KEYS.playbackRate, rate.toString())
         if (videoRef.current) {
+            videoRef.current.defaultPlaybackRate = rate
             videoRef.current.playbackRate = rate
         }
         setSettingsTab('main')
     }
 
     const handleLoadedMetadata = async () => {
-        setDuration(videoRef.current?.duration || 0)
+        const video = videoRef.current
+        if (isTranscodeRef.current) {
+            // The element only knows the length of the stream so far; use the file's real duration.
+            if (playbackInfo?.duration) setDuration(playbackInfo.duration)
+        } else {
+            setDuration(video?.duration || 0)
+            if (video && pendingStartTimeRef.current > 0) {
+                video.currentTime = pendingStartTimeRef.current
+                pendingStartTimeRef.current = 0
+            }
+        }
+
+        // Converted streams fire loadedmetadata on every seek restart; load track lists once per movie.
+        if (tracksLoadedForMovieRef.current === movie.id) return
+        tracksLoadedForMovieRef.current = movie.id
 
         try {
             // Fetch metadata from backend
@@ -528,7 +723,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                         (track.language && track.language === storedAudioLang) || (track.label && track.label === storedAudioLang)
                     )
                     if (index >= 0) {
-                        setTimeout(() => toggleAudioTrack(index), 0)
+                        setTimeout(() => toggleAudioTrack(index, tracks), 0)
                     }
                 }
             }
@@ -558,7 +753,27 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         }
     }
 
-    const toggleAudioTrack = (index: number) => {
+    const toggleAudioTrack = (index: number, trackSource?: AudioTrack[]) => {
+        if (isTranscodeRef.current) {
+            // Converted streams carry a single audio track; switching restarts the stream with the new one.
+            const trackList = trackSource ?? audioTracks
+            const track = trackList[index]
+            if (!track) return
+            const streamIndex = Number(track.id)
+            const activeIndex = audioStreamIndexRef.current ?? Number(trackList[0]?.id)
+            setAudioTracks(trackList.map((t, i) => ({ ...t, enabled: i === index })))
+            const audioIdentifier = track.language || track.label
+            if (audioIdentifier) {
+                setStoredValue(STORAGE_KEYS.audio, audioIdentifier)
+            }
+            if (streamIndex !== activeIndex) {
+                audioStreamIndexRef.current = streamIndex
+                startStreamAt(getAbsoluteTime(), isPlaybackIntended())
+            }
+            setSettingsTab('main')
+            return
+        }
+
         if (videoRef.current) {
             const videoEl = videoRef.current as unknown as VideoElementWithTracks
             const wasPlaying = !videoRef.current.paused
@@ -621,38 +836,16 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
         try {
             const vttContent = await window.ipcRenderer.invoke('media:extract-subtitle-content', movie.file_path, parseInt((track as any).id))
-            const blob = new Blob([vttContent], { type: 'text/vtt' })
-            const url = URL.createObjectURL(blob)
 
-            // Create or update track element
             if (videoRef.current) {
-                // Remove existing tracks
-                const existingTracks = videoRef.current.querySelectorAll('track')
-                existingTracks.forEach(t => t.remove())
+                activeSubtitleRef.current = { vtt: vttContent, label: track.label, language: track.language }
+                attachActiveSubtitle()
 
-                const trackEl = document.createElement('track')
-                trackEl.kind = 'subtitles'
-                trackEl.label = track.label
-                trackEl.srclang = track.language
-                trackEl.src = url
-                trackEl.default = true
-                videoRef.current.appendChild(trackEl)
-                revokeSubtitleObjectUrl()
-                subtitleObjectUrlRef.current = url
-
-                // Update state
                 const newTracks = trackList.map((t, i) => ({
                     ...t,
                     mode: i === index ? 'showing' : 'hidden'
                 }))
                 setTextTracks(newTracks as any)
-
-                // Force mode to showing
-                setTimeout(() => {
-                    if (trackEl.track) {
-                        trackEl.track.mode = 'showing'
-                    }
-                }, 100)
             }
             const subtitleIdentifier = track.language || track.label
             if (subtitleIdentifier) {
@@ -666,6 +859,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     }
 
     const disableSubtitles = () => {
+        activeSubtitleRef.current = null
         if (videoRef.current) {
             const existingTracks = videoRef.current.querySelectorAll('track')
             existingTracks.forEach(t => t.remove())
@@ -679,24 +873,29 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     }
 
     const handleResume = () => {
+        // The source was already loaded at the saved position; just start playing.
+        setAutoPlayEnabled(true)
         if (videoRef.current && savedProgress) {
-            videoRef.current.currentTime = savedProgress
             lastUiTimeRef.current = savedProgress
             setCurrentTime(savedProgress)
             setIsPlaying(true)
-            videoRef.current.play()
+            void videoRef.current.play().catch(() => undefined)
         }
         setShowResumePrompt(false)
     }
 
     const handleRestart = () => {
-        if (videoRef.current) {
+        setAutoPlayEnabled(true)
+        if (isTranscodeRef.current) {
+            startStreamAt(0, true)
+        } else if (videoRef.current) {
+            pendingStartTimeRef.current = 0
             videoRef.current.currentTime = 0
             lastUiTimeRef.current = 0
             setCurrentTime(0)
-            setIsPlaying(true)
-            videoRef.current.play()
+            void videoRef.current.play().catch(() => undefined)
         }
+        setIsPlaying(true)
         setShowResumePrompt(false)
     }
 
@@ -986,8 +1185,19 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 <video
                     ref={videoRef}
                     className="w-full h-full object-contain"
-                    autoPlay
-                    src={`media://${encodeURIComponent(movie.file_path)}`}
+                    autoPlay={autoPlayEnabled}
+                    src={videoSrc}
+                    onError={() => {
+                        const error = videoRef.current?.error
+                        if (!error || !videoSrc) return
+                        console.error('Video playback error:', error.code, error.message)
+                        hideBufferingIndicator()
+                        setPlaybackError(
+                            playbackInfo?.mode === 'transcode'
+                                ? 'Kino couldn’t convert this video for playback.'
+                                : 'This video format isn’t supported.'
+                        )
+                    }}
                     onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={handleLoadedMetadata}
                     onPlay={() => {
@@ -1014,7 +1224,14 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                             setIsBuffering(true)
                         }, 200)
                     }}
-                    onPlaying={hideBufferingIndicator}
+                    onPlaying={() => {
+                        pendingPlayIntentRef.current = null
+                        hideBufferingIndicator()
+                    }}
+                    onCanPlay={() => {
+                        // A stream that was meant to stay paused has loaded; normal state from here.
+                        if (pendingPlayIntentRef.current === false) pendingPlayIntentRef.current = null
+                    }}
                     onSeeked={() => {
                         // A short grace period prevents spinner flash on successful seeks.
                         suppressBufferingUntilRef.current = Date.now() + 150
@@ -1035,7 +1252,17 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                         </button>
                         <div>
                             <h2 className="text-xl font-bold text-white drop-shadow-md">{movie.title}</h2>
-                            {movie.year && <p className="text-white/60 text-sm">{movie.year}</p>}
+                            <div className="flex items-center gap-2 text-sm">
+                                {movie.year && <span className="text-white/60">{movie.year}</span>}
+                                {playbackInfo?.mode === 'transcode' && (
+                                    <span
+                                        className="px-1.5 py-0.5 rounded bg-white/10 text-white/60 text-[11px] font-medium"
+                                        title={`${playbackInfo.reason ?? 'Unsupported format'} — converting while playing. Seeking far ahead takes a moment.`}
+                                    >
+                                        Converted
+                                    </span>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1104,6 +1331,29 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                                 </div>
                             ))}
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Probing the file / waiting for the first frame of a converted stream */}
+            {!videoSrc && !playbackError && (
+                <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
+                    <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-primary"></div>
+                </div>
+            )}
+
+            {/* Playback Error */}
+            {playbackError && (
+                <div className="absolute inset-0 flex items-center justify-center z-30 pointer-events-none">
+                    <div className="max-w-md mx-6 text-center pointer-events-auto">
+                        <p className="text-xl font-semibold text-white">{playbackError}</p>
+                        <p className="mt-2 text-sm text-white/60 break-all">{movie.file_path}</p>
+                        <button
+                            onClick={onClose}
+                            className="mt-6 px-5 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-white font-medium border border-white/10 transition-colors"
+                        >
+                            Close
+                        </button>
                     </div>
                 </div>
             )}
