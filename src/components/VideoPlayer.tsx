@@ -1,7 +1,7 @@
 import {
     Play, Pause, Volume2, VolumeX, Maximize, Minimize,
     SkipBack, SkipForward, ChevronLeft, Gauge, MessageSquare, Languages,
-    History, RotateCcw, Settings, Check, Keyboard, PictureInPicture2
+    History, RotateCcw, Settings, Check, Keyboard, PictureInPicture2, Type, X
 } from 'lucide-react'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Movie, VideoElementWithTracks, AudioTrack } from '../types'
@@ -14,14 +14,43 @@ interface VideoPlayerProps {
     hasNext?: boolean
     hasPrevious?: boolean
     disableProgress?: boolean
+    /** 'prompt' asks whether to resume saved progress; 'resume'/'restart' skip the question. */
+    startMode?: 'prompt' | 'resume' | 'restart'
 }
 
-type SettingsTab = 'main' | 'audio' | 'subtitles' | 'speed' | 'shortcuts'
+type SettingsTab = 'main' | 'audio' | 'subtitles' | 'subtitleSize' | 'speed'
+
+type SubtitleSize = 'small' | 'medium' | 'large' | 'xlarge'
+
+const SUBTITLE_SIZES: { value: SubtitleSize; label: string }[] = [
+    { value: 'small', label: 'Small' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'large', label: 'Large' },
+    { value: 'xlarge', label: 'Extra large' },
+]
+
+const SHORTCUTS: { keys: string[]; label: string }[] = [
+    { keys: ['Space', 'K'], label: 'Play / Pause' },
+    { keys: ['←'], label: 'Rewind 10s' },
+    { keys: ['Shift', '←'], label: 'Rewind 30s' },
+    { keys: ['→'], label: 'Forward 10s' },
+    { keys: ['Shift', '→'], label: 'Forward 30s' },
+    { keys: ['↑'], label: 'Volume up' },
+    { keys: ['↓'], label: 'Volume down' },
+    { keys: ['M'], label: 'Mute' },
+    { keys: ['F'], label: 'Fullscreen' },
+    { keys: ['I'], label: 'Picture in Picture' },
+    { keys: ['N'], label: 'Next video' },
+    { keys: ['P'], label: 'Previous video' },
+    { keys: ['?'], label: 'Show shortcuts' },
+    { keys: ['Esc'], label: 'Close player' },
+]
 
 const STORAGE_KEYS = {
     playbackRate: 'kino_preferred_speed',
     subtitle: 'kino_preferred_subtitle_language',
-    audio: 'kino_preferred_audio_language'
+    audio: 'kino_preferred_audio_language',
+    subtitleSize: 'kino_subtitle_size'
 }
 
 const getStoredValue = (key: string) => {
@@ -39,7 +68,7 @@ const removeStoredValue = (key: string) => {
     window.localStorage.removeItem(key)
 }
 
-export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPrevious, disableProgress }: VideoPlayerProps) {
+export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPrevious, disableProgress, startMode = 'prompt' }: VideoPlayerProps) {
     const videoRef = useRef<HTMLVideoElement>(null)
     const containerRef = useRef<HTMLDivElement>(null)
     const controlsTimeoutRef = useRef<NodeJS.Timeout>()
@@ -49,6 +78,11 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const pendingSeekTimeRef = useRef<number | null>(null)
     const isScrubbingRef = useRef(false)
     const suppressBufferingUntilRef = useRef(0)
+    const volumeOsdTimeoutRef = useRef<NodeJS.Timeout>()
+    // Effective volume for rapid key repeats, which fire faster than React re-renders.
+    const effectiveVolumeRef = useRef(1)
+    // Only the first movie honours startMode; next/previous episodes use the normal prompt.
+    const startModeRef = useRef(startMode)
 
     // State
     const [isPlaying, setIsPlaying] = useState(true)
@@ -85,6 +119,13 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
     // Up Next Overlay State
     const [showUpNext, setShowUpNext] = useState(false)
+
+    const [showShortcuts, setShowShortcuts] = useState(false)
+    const [showVolumeOsd, setShowVolumeOsd] = useState(false)
+    const [subtitleSize, setSubtitleSize] = useState<SubtitleSize>(() => {
+        const stored = getStoredValue(STORAGE_KEYS.subtitleSize)
+        return SUBTITLE_SIZES.some(s => s.value === stored) ? stored as SubtitleSize : 'medium'
+    })
 
     const revokeSubtitleObjectUrl = useCallback(() => {
         if (subtitleObjectUrlRef.current) {
@@ -213,6 +254,18 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             try {
                 if (disableProgress) return
                 const progress = await window.ipcRenderer.invoke('db:get-playback-progress', movie.id)
+                const mode = startModeRef.current
+                startModeRef.current = 'prompt'
+                if (mode === 'restart') return
+                if (mode === 'resume' && progress && progress > 5) {
+                    lastUiTimeRef.current = progress
+                    setCurrentTime(progress)
+                    if (videoRef.current) {
+                        videoRef.current.currentTime = progress
+                        void videoRef.current.play().catch(() => undefined)
+                    }
+                    return
+                }
                 if (progress && progress > 5) { // Only resume if watched more than 5 seconds
                     setSavedProgress(progress)
                     lastUiTimeRef.current = progress
@@ -371,15 +424,37 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         }
     }
 
-    const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const newVolume = parseFloat(e.target.value)
+    const applyVolume = (level: number) => {
+        const newVolume = Math.round(Math.min(1, Math.max(0, level)) * 100) / 100
+        effectiveVolumeRef.current = newVolume
         setVolume(newVolume)
+        setIsMuted(newVolume === 0)
         localStorage.setItem('kino_volume', newVolume.toString())
         if (videoRef.current) {
             videoRef.current.volume = newVolume
-            setIsMuted(newVolume === 0)
+            videoRef.current.muted = newVolume === 0
         }
     }
+
+    const flashVolumeOsd = () => {
+        setShowVolumeOsd(true)
+        if (volumeOsdTimeoutRef.current) clearTimeout(volumeOsdTimeoutRef.current)
+        volumeOsdTimeoutRef.current = setTimeout(() => setShowVolumeOsd(false), 1200)
+    }
+
+    useEffect(() => {
+        return () => {
+            if (volumeOsdTimeoutRef.current) clearTimeout(volumeOsdTimeoutRef.current)
+        }
+    }, [])
+
+    const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        applyVolume(parseFloat(e.target.value))
+    }
+
+    useEffect(() => {
+        effectiveVolumeRef.current = isMuted ? 0 : volume
+    }, [volume, isMuted])
 
     const toggleMute = () => {
         if (videoRef.current) {
@@ -664,25 +739,32 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                     break
                 case 'arrowup':
                     e.preventDefault()
-                    setVolume(v => Math.min(1, v + 0.1))
-                    if (videoRef.current) videoRef.current.volume = Math.min(1, volume + 0.1)
+                    applyVolume(effectiveVolumeRef.current + 0.1)
+                    flashVolumeOsd()
                     break
                 case 'arrowdown':
                     e.preventDefault()
-                    setVolume(v => Math.max(0, v - 0.1))
-                    if (videoRef.current) videoRef.current.volume = Math.max(0, volume - 0.1)
+                    applyVolume(effectiveVolumeRef.current - 0.1)
+                    flashVolumeOsd()
                     break
                 case 'f':
                     toggleFullscreen()
                     break
                 case 'm':
                     toggleMute()
+                    flashVolumeOsd()
+                    break
+                case '?':
+                    e.preventDefault()
+                    setShowShortcuts(v => !v)
                     break
                 case 'i':
                     togglePictureInPicture()
                     break
                 case 'escape':
-                    if (document.fullscreenElement) {
+                    if (showShortcuts) {
+                        setShowShortcuts(false)
+                    } else if (document.fullscreenElement) {
                         document.exitFullscreen()
                         setIsFullscreen(false)
                     } else if (showSettings) {
@@ -706,7 +788,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
         window.addEventListener('keydown', handleKeyDown)
         return () => window.removeEventListener('keydown', handleKeyDown)
-    }, [onClose, volume, showControlsHandler, showSettings, togglePictureInPicture])
+    }, [onClose, volume, isMuted, showControlsHandler, showSettings, showShortcuts, togglePictureInPicture, hasNext, hasPrevious, onNext, onPrevious])
 
     // Settings Menu Content
     const renderSettingsContent = () => {
@@ -741,6 +823,19 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                             </div>
                         </button>
                         <button
+                            onClick={() => setSettingsTab('subtitleSize')}
+                            className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
+                        >
+                            <div className="flex items-center gap-2">
+                                <Type className="w-4 h-4" />
+                                <span>Subtitle size</span>
+                            </div>
+                            <div className="flex items-center gap-1 text-white/50 text-xs">
+                                <span>{SUBTITLE_SIZES.find(s => s.value === subtitleSize)?.label}</span>
+                                <ChevronLeft className="w-4 h-4 rotate-180" />
+                            </div>
+                        </button>
+                        <button
                             onClick={() => setSettingsTab('speed')}
                             className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
                         >
@@ -754,14 +849,17 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                             </div>
                         </button>
                         <button
-                            onClick={() => setSettingsTab('shortcuts')}
+                            onClick={() => {
+                                setShowSettings(false)
+                                setShowShortcuts(true)
+                            }}
                             className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
                         >
                             <div className="flex items-center gap-2">
                                 <Keyboard className="w-4 h-4" />
-                                <span>Shortcuts</span>
+                                <span>Keyboard shortcuts</span>
                             </div>
-                            <ChevronLeft className="w-4 h-4 rotate-180 text-white/50" />
+                            <span className="font-mono text-xs text-white/50 bg-white/10 px-1.5 rounded">?</span>
                         </button>
                     </div>
                 )
@@ -841,7 +939,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                         ))}
                     </div>
                 )
-            case 'shortcuts':
+            case 'subtitleSize':
                 return (
                     <div className="flex flex-col gap-1 min-w-[240px]">
                         <button
@@ -849,58 +947,22 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                             className="flex items-center gap-2 px-3 py-2 mb-2 rounded hover:bg-white/10 text-sm text-white/70 hover:text-white transition-colors border-b border-white/10"
                         >
                             <ChevronLeft className="w-4 h-4" />
-                            <span>Back</span>
+                            <span>Subtitle size</span>
                         </button>
-                        <div className="px-3 py-1 space-y-2">
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Play/Pause</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">Space</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Rewind 10s</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">←</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Rewind 30s</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">Shift + ←</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Forward 10s</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">→</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Forward 30s</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">Shift + →</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Volume Up</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">↑</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Volume Down</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">↓</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Fullscreen</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">F</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Picture in Picture</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">I</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Mute</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">M</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Next Video</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">N</span>
-                            </div>
-                            <div className="flex justify-between text-xs text-white/80">
-                                <span>Previous Video</span>
-                                <span className="font-mono bg-white/10 px-1 rounded">P</span>
-                            </div>
-                        </div>
+                        {SUBTITLE_SIZES.map(size => (
+                            <button
+                                key={size.value}
+                                onClick={() => {
+                                    setSubtitleSize(size.value)
+                                    setStoredValue(STORAGE_KEYS.subtitleSize, size.value)
+                                    setSettingsTab('main')
+                                }}
+                                className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
+                            >
+                                <span>{size.label}</span>
+                                {subtitleSize === size.value && <Check className="w-4 h-4 text-primary" />}
+                            </button>
+                        ))}
                     </div>
                 )
         }
@@ -909,6 +971,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     return (
         <div
             ref={containerRef}
+            data-video-player
+            data-subtitle-size={subtitleSize}
             className="fixed inset-0 z-50 bg-black flex items-center justify-center group select-none"
             onMouseMove={showControlsHandler}
             onMouseLeave={() => isPlaying && !showSettings && setShowControls(false)}
@@ -982,11 +1046,64 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             {/* Click Feedback Animation */}
             {clickFeedback && (
                 <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
-                    <div className="p-6 bg-black/40 rounded-full backdrop-blur-md animate-out fade-out zoom-out duration-500">
+                    <div className="p-6 bg-black/40 rounded-full backdrop-blur-md animate-out fade-out zoom-out-75 fill-mode-forwards duration-500">
                         {clickFeedback === 'play' && <Play className="w-12 h-12 text-white fill-white" />}
                         {clickFeedback === 'pause' && <Pause className="w-12 h-12 text-white fill-white" />}
                         {clickFeedback === 'forward' && <SkipForward className="w-12 h-12 text-white fill-white" />}
                         {clickFeedback === 'rewind' && <SkipBack className="w-12 h-12 text-white fill-white" />}
+                    </div>
+                </div>
+            )}
+
+            {/* Volume OSD (keyboard volume changes) */}
+            {showVolumeOsd && (
+                <div className="absolute top-24 left-1/2 -translate-x-1/2 z-30 pointer-events-none animate-in fade-in duration-150">
+                    <div className="flex items-center gap-3 px-4 py-2.5 rounded-full bg-black/70 backdrop-blur-md border border-white/10">
+                        {isMuted || volume === 0 ? <VolumeX className="w-5 h-5 text-white" /> : <Volume2 className="w-5 h-5 text-white" />}
+                        <div className="w-32 h-1 rounded-full bg-white/20 overflow-hidden">
+                            <div className="h-full bg-white transition-[width] duration-150" style={{ width: `${(isMuted ? 0 : volume) * 100}%` }} />
+                        </div>
+                        <span className="w-9 text-right text-sm font-medium tabular-nums text-white">
+                            {Math.round((isMuted ? 0 : volume) * 100)}
+                        </span>
+                    </div>
+                </div>
+            )}
+
+            {/* Keyboard Shortcuts Overlay */}
+            {showShortcuts && (
+                <div
+                    className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-150"
+                    onClick={() => setShowShortcuts(false)}
+                >
+                    <div
+                        className="w-full max-w-lg mx-6 bg-surface/95 border border-white/10 rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-center justify-between mb-5">
+                            <h3 className="text-lg font-semibold text-white">Keyboard shortcuts</h3>
+                            <button
+                                onClick={() => setShowShortcuts(false)}
+                                className="p-1.5 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+                                aria-label="Close shortcuts"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2.5">
+                            {SHORTCUTS.map(shortcut => (
+                                <div key={shortcut.label} className="flex items-center justify-between gap-4 text-sm">
+                                    <span className="text-white/70">{shortcut.label}</span>
+                                    <span className="flex gap-1">
+                                        {shortcut.keys.map(key => (
+                                            <kbd key={key} className="min-w-[1.75rem] text-center font-sans text-xs text-white bg-white/10 border border-white/10 rounded-md px-1.5 py-0.5">
+                                                {key}
+                                            </kbd>
+                                        ))}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 </div>
             )}

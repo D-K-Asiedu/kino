@@ -80,10 +80,10 @@ export function HorizontalScroller({ children, className = '' }: HorizontalScrol
         <div className="relative group/scroller">
             {/* Left Arrow */}
             {showLeftArrow && (
-                <div className="absolute left-0 top-0 bottom-6 w-24 bg-gradient-to-r from-background via-background/80 to-transparent z-10 flex items-center justify-start pointer-events-none opacity-0 group-hover/scroller:opacity-100 transition-opacity duration-300">
+                <div className="absolute left-0 top-0 bottom-6 w-20 bg-gradient-to-r from-background via-background/70 to-transparent z-10 flex items-center justify-start pointer-events-none">
                     <button
                         onClick={() => scroll('left')}
-                        className="pointer-events-auto ml-2 p-3 rounded-full bg-black/50 hover:bg-primary hover:scale-110 text-white backdrop-blur-md border border-white/10 shadow-xl transition-all duration-300"
+                        className="pointer-events-auto ml-2 p-3 rounded-full bg-black/50 hover:bg-primary hover:scale-110 text-white backdrop-blur-md border border-white/10 shadow-xl transition-all duration-300 opacity-0 group-hover/scroller:opacity-100 focus-visible:opacity-100"
                         aria-label="Scroll left"
                     >
                         <ChevronLeft className="w-6 h-6" />
@@ -102,10 +102,10 @@ export function HorizontalScroller({ children, className = '' }: HorizontalScrol
 
             {/* Right Arrow */}
             {showRightArrow && (
-                <div className="absolute right-0 top-0 bottom-6 w-24 bg-gradient-to-l from-background via-background/80 to-transparent z-10 flex items-center justify-end pointer-events-none opacity-0 group-hover/scroller:opacity-100 transition-opacity duration-300">
+                <div className="absolute right-0 top-0 bottom-6 w-20 bg-gradient-to-l from-background via-background/70 to-transparent z-10 flex items-center justify-end pointer-events-none">
                     <button
                         onClick={() => scroll('right')}
-                        className="pointer-events-auto mr-2 p-3 rounded-full bg-black/50 hover:bg-primary hover:scale-110 text-white backdrop-blur-md border border-white/10 shadow-xl transition-all duration-300"
+                        className="pointer-events-auto mr-2 p-3 rounded-full bg-black/50 hover:bg-primary hover:scale-110 text-white backdrop-blur-md border border-white/10 shadow-xl transition-all duration-300 opacity-0 group-hover/scroller:opacity-100 focus-visible:opacity-100"
                         aria-label="Scroll right"
                     >
                         <ChevronRight className="w-6 h-6" />

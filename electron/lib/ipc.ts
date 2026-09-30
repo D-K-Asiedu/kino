@@ -54,9 +54,12 @@ export function registerIPC() {
     ipcMain.handle('db:create-playlist', (_, name) => {
         // When manually creating a playlist, clear it from deleted list if it was there
         db.clearDeletedFolderPlaylist(name)
-        return db.createPlaylist(name)
+        const result = db.createPlaylist(name)
+        notifyRenderer('playlists-updated')
+        return result
     })
     ipcMain.handle('db:get-playlists', () => db.getPlaylists())
+    ipcMain.handle('db:get-playlists-overview', () => db.getPlaylistsOverview())
     ipcMain.handle('db:delete-playlist', (_, id) => {
         // Get playlist name before deletion to track it
         const playlist = db.getPlaylistById(id)
@@ -65,10 +68,20 @@ export function registerIPC() {
             db.markFolderPlaylistDeleted(playlist.name)
             console.log(`Playlist "${playlist.name}" marked as deleted (won't auto-regenerate)`)
         }
-        return db.deletePlaylist(id)
+        const result = db.deletePlaylist(id)
+        notifyRenderer('playlists-updated')
+        return result
     })
-    ipcMain.handle('db:add-movie-to-playlist', (_, playlistId, movieId) => db.addMovieToPlaylist(playlistId, movieId))
-    ipcMain.handle('db:remove-movie-from-playlist', (_, playlistId, movieId) => db.removeMovieFromPlaylist(playlistId, movieId))
+    ipcMain.handle('db:add-movie-to-playlist', (_, playlistId, movieId) => {
+        const result = db.addMovieToPlaylist(playlistId, movieId)
+        notifyRenderer('playlists-updated')
+        return result
+    })
+    ipcMain.handle('db:remove-movie-from-playlist', (_, playlistId, movieId) => {
+        const result = db.removeMovieFromPlaylist(playlistId, movieId)
+        notifyRenderer('playlists-updated')
+        return result
+    })
     ipcMain.handle('db:get-playlist-movies', (_, playlistId) => db.getPlaylistMovies(playlistId))
     ipcMain.handle('db:update-playlist-last-watched', (_, playlistId) => db.updatePlaylistLastWatched(playlistId))
 
@@ -78,7 +91,9 @@ export function registerIPC() {
 
     ipcMain.handle('db:generate-default-playlists', async () => {
         const { generateDefaultPlaylists } = await import('./playlists')
-        return generateDefaultPlaylists()
+        const result = await generateDefaultPlaylists()
+        notifyRenderer('playlists-updated')
+        return result
     })
 
     ipcMain.handle('dialog:open-directory', async () => {

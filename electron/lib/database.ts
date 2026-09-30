@@ -152,6 +152,8 @@ export function getMovies() {
 interface LibraryPageQuery {
   searchQuery?: string
   filterBy?: string
+  rating?: string
+  decade?: string
   sortBy?: string
   limit?: number
   offset?: number
@@ -195,6 +197,41 @@ export function getLibraryPage(query?: LibraryPageQuery) {
       whereClauses.push('year BETWEEN 1980 AND 1989')
       break
     case 'year-older':
+      whereClauses.push('year < 1980')
+      break
+    default:
+      break
+  }
+
+  // Combinable filters: rating and decade can be applied together.
+  switch (String(query?.rating ?? 'all')) {
+    case 'rated':
+      whereClauses.push('rating IS NOT NULL')
+      break
+    case 'unrated':
+      whereClauses.push('rating IS NULL')
+      break
+    default:
+      break
+  }
+
+  switch (String(query?.decade ?? 'all')) {
+    case '2020s':
+      whereClauses.push('year >= 2020')
+      break
+    case '2010s':
+      whereClauses.push('year BETWEEN 2010 AND 2019')
+      break
+    case '2000s':
+      whereClauses.push('year BETWEEN 2000 AND 2009')
+      break
+    case '1990s':
+      whereClauses.push('year BETWEEN 1990 AND 1999')
+      break
+    case '1980s':
+      whereClauses.push('year BETWEEN 1980 AND 1989')
+      break
+    case 'older':
       whereClauses.push('year < 1980')
       break
     default:
@@ -589,11 +626,39 @@ function getPlaylistPreviewMovieMap(playlistIds: number[]) {
   return previewMap
 }
 
+function getPlaylistMovieCounts(playlistIds: number[]) {
+  const uniqueIds = [...new Set(playlistIds)].filter((id) => Number.isFinite(id))
+  const counts = new Map<number, number>()
+  if (uniqueIds.length === 0) return counts
+
+  const placeholders = uniqueIds.map(() => '?').join(', ')
+  const rows = getDB().prepare(`
+    SELECT playlist_id, COUNT(*) as count
+    FROM playlist_movies
+    WHERE playlist_id IN (${placeholders})
+    GROUP BY playlist_id
+  `).all(...uniqueIds) as { playlist_id: number; count: number }[]
+
+  for (const row of rows) {
+    counts.set(Number(row.playlist_id), row.count)
+  }
+  return counts
+}
+
 function withPlaylistPreviewMovies(playlists: any[], previewMap: Map<number, any[]>) {
+  const counts = getPlaylistMovieCounts(playlists.map((playlist) => Number(playlist.id)))
   return playlists.map((playlist) => ({
     ...playlist,
+    movie_count: counts.get(Number(playlist.id)) ?? 0,
     movies: previewMap.get(Number(playlist.id)) ?? []
   }))
+}
+
+// All playlists with up to 4 preview movies and their real movie count, for the Playlists page
+export function getPlaylistsOverview() {
+  const playlists = getPlaylists() as any[]
+  const previewMap = getPlaylistPreviewMovieMap(playlists.map((playlist) => Number(playlist.id)))
+  return withPlaylistPreviewMovies(playlists, previewMap)
 }
 
 // Home Page Data

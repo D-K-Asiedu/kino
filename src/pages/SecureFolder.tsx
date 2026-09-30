@@ -2,15 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Lock, Unlock, Play, Trash2, EyeOff } from 'lucide-react'
 import { SecureItem, Movie } from '../types'
 import { VideoPlayer } from '../components/VideoPlayer'
-
-const PLACEHOLDER_POSTER = `data:image/svg+xml,${encodeURIComponent(`
-<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
-  <rect fill="#1f2937" width="640" height="360"/>
-  <text x="50%" y="50%" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="24" text-anchor="middle" dominant-baseline="middle">Secure</text>
-</svg>
-`)}`
+import { Poster } from '../components/Poster'
+import { useFeedback } from '../components/Feedback'
 
 export function SecureFolder() {
+    const { confirm, toast } = useFeedback()
     const [loading, setLoading] = useState(true)
     const [hasPassword, setHasPassword] = useState(false)
     const [isUnlocked, setIsUnlocked] = useState(false)
@@ -113,7 +109,12 @@ export function SecureFolder() {
     }
 
     const handleReset = async () => {
-        const ok = confirm('Reset secure folder? This will delete everything inside it.')
+        const ok = await confirm({
+            title: 'Reset Secure Folder?',
+            message: 'This permanently deletes every video inside it and removes your password. This can’t be undone.',
+            confirmLabel: 'Reset and delete',
+            destructive: true,
+        })
         if (!ok) return
         setError(null)
         await window.ipcRenderer.invoke('secure:reset')
@@ -155,10 +156,16 @@ export function SecureFolder() {
     }
 
     const handleDelete = async (item: SecureItem) => {
-        const ok = confirm(`Remove "${item.title}" from Secure Folder?`)
+        const ok = await confirm({
+            title: `Delete “${item.title}”?`,
+            message: 'The encrypted copy will be permanently deleted from the Secure Folder.',
+            confirmLabel: 'Delete',
+            destructive: true,
+        })
         if (!ok) return
         await window.ipcRenderer.invoke('secure:delete-item', item.id)
         fetchItems()
+        toast(`Deleted “${item.title}”`)
     }
 
     const heroNote = useMemo(() => {
@@ -192,7 +199,7 @@ export function SecureFolder() {
         <div className="p-8 max-w-[1920px] mx-auto">
             <header className="flex items-center justify-between mb-8">
                 <div>
-                    <h2 className="text-3xl font-bold text-white tracking-tight flex items-center gap-3">
+                    <h2 className="text-3xl font-semibold text-white tracking-tight flex items-center gap-3">
                         <span className="inline-flex w-9 h-9 rounded-xl bg-white/5 items-center justify-center border border-white/10">
                             {isUnlocked ? <Unlock className="w-4 h-4 text-primary" /> : <Lock className="w-4 h-4 text-white/60" />}
                         </span>
@@ -297,16 +304,11 @@ export function SecureFolder() {
                     ) : (
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
                             {items.map((item) => {
-                                const posterPath = thumbs[item.id]
-                                const posterUrl = posterPath
-                                    ? `media://${encodeURIComponent(posterPath)}`
-                                    : PLACEHOLDER_POSTER
-
                                 return (
                                     <SecureItemCard
                                         key={item.id}
                                         item={item}
-                                        posterUrl={posterUrl}
+                                        posterPath={thumbs[item.id] ?? null}
                                         onPlay={handlePlay}
                                         onDelete={handleDelete}
                                         requestThumbnail={requestThumbnail}
@@ -337,14 +339,14 @@ export function SecureFolder() {
 
 function SecureItemCard({
     item,
-    posterUrl,
+    posterPath,
     onPlay,
     onDelete,
     requestThumbnail,
     isUnlocked,
 }: {
     item: SecureItem
-    posterUrl: string
+    posterPath: string | null
     onPlay: (item: SecureItem) => void
     onDelete: (item: SecureItem) => void
     requestThumbnail: (itemId: number) => Promise<string | null>
@@ -365,7 +367,9 @@ function SecureItemCard({
                     if (entry.isIntersecting) {
                         setRequested(true)
                         setLoadingThumb(true)
-                        void requestThumbnail(item.id)
+                        void requestThumbnail(item.id).then((path) => {
+                            if (!path) setLoadingThumb(false)
+                        })
                         observer.disconnect()
                         return
                     }
@@ -389,11 +393,10 @@ function SecureItemCard({
                         <div className="absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-white/10 to-transparent" />
                     </div>
                 )}
-                <img
-                    src={posterUrl}
-                    alt={item.title}
+                <Poster
+                    path={posterPath}
+                    title={item.title}
                     className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                    loading="lazy"
                     onLoad={() => setLoadingThumb(false)}
                     onError={() => setLoadingThumb(false)}
                 />

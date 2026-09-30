@@ -1,29 +1,41 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { MovieCard } from '../components/MovieCard'
 import { VideoPlayer } from '../components/VideoPlayer'
 import { VirtualMovieGrid } from '../components/VirtualMovieGrid'
+import { MovieGridSkeleton } from '../components/Skeleton'
+import { ActiveFilterChips, MovieFilterControls } from '../components/MovieFilterControls'
+import { DEFAULT_FILTERS, DEFAULT_SORT, MovieFilters, countActiveFilters } from '../lib/movieFilters'
 import { Movie } from '../types'
-import { Search, SlidersHorizontal, ArrowUpDown, ChevronDown, Check } from 'lucide-react'
+import { FolderPlus, Search, X } from 'lucide-react'
 import { useCoalescedIpcRefresh } from '../hooks/useCoalescedIpcRefresh'
 
 const PAGE_SIZE = 120
 
 export function Library() {
+    const location = useLocation()
+    const navigate = useNavigate()
+    const searchInputRef = useRef<HTMLInputElement>(null)
     const [movies, setMovies] = useState<Movie[]>([])
     const [totalMovies, setTotalMovies] = useState(0)
     const [hasMore, setHasMore] = useState(false)
     const [loadingMore, setLoadingMore] = useState(false)
     const [searchQuery, setSearchQuery] = useState('')
     const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('')
-    const [filterBy, setFilterBy] = useState('all')
-    const [sortBy, setSortBy] = useState('recent')
+    const [filters, setFilters] = useState<MovieFilters>(DEFAULT_FILTERS)
+    const [sortBy, setSortBy] = useState(DEFAULT_SORT)
     const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
-    const [showFilterMenu, setShowFilterMenu] = useState(false)
-    const [showSortMenu, setShowSortMenu] = useState(false)
-    const filterMenuRef = useRef<HTMLDivElement | null>(null)
-    const sortMenuRef = useRef<HTMLDivElement | null>(null)
+
+    // Global Ctrl+K / "/" shortcut navigates here with a fresh focusSearch token.
+    const focusSearchToken = (location.state as { focusSearch?: number } | null)?.focusSearch
+    useEffect(() => {
+        if (focusSearchToken) {
+            searchInputRef.current?.focus()
+            searchInputRef.current?.select()
+        }
+    }, [focusSearchToken])
 
     useEffect(() => {
         const timer = window.setTimeout(() => {
@@ -41,7 +53,8 @@ export function Library() {
             }
             const page = await window.ipcRenderer.invoke('db:get-library-page', {
                 searchQuery: debouncedSearchQuery,
-                filterBy,
+                rating: filters.rating,
+                decade: filters.decade,
                 sortBy,
                 limit: PAGE_SIZE,
                 offset,
@@ -71,7 +84,7 @@ export function Library() {
             setLoading(false)
             setLoadingMore(false)
         }
-    }, [debouncedSearchQuery, filterBy, sortBy])
+    }, [debouncedSearchQuery, filters, sortBy])
 
     const fetchInitialMovies = useCallback(async () => {
         await fetchMoviesPage(0, true)
@@ -90,7 +103,7 @@ export function Library() {
 
     useEffect(() => {
         void refreshMovies()
-    }, [refreshMovies, debouncedSearchQuery, filterBy, sortBy])
+    }, [refreshMovies, debouncedSearchQuery, filters, sortBy])
 
     useEffect(() => {
         const scrollRoot = document.getElementById('app-scroll-root')
@@ -117,20 +130,6 @@ export function Library() {
             }
         }
     }, [fetchMoreMovies, hasMore, loading, loadingMore])
-
-    useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            if (filterMenuRef.current && !filterMenuRef.current.contains(event.target as Node)) {
-                setShowFilterMenu(false)
-            }
-            if (sortMenuRef.current && !sortMenuRef.current.contains(event.target as Node)) {
-                setShowSortMenu(false)
-            }
-        }
-
-        document.addEventListener('mousedown', handleClickOutside)
-        return () => document.removeEventListener('mousedown', handleClickOutside)
-    }, [])
 
     useEffect(() => {
         if (selectedMovie && !movies.some(movie => movie.id === selectedMovie.id)) {
@@ -181,37 +180,16 @@ export function Library() {
         return movies.findIndex(m => m.id === selectedMovie.id)
     }
 
-    const filterOptions = [
-        { value: 'all', label: 'All movies' },
-        { value: 'rated', label: 'Rated only' },
-        { value: 'unrated', label: 'Unrated only' },
-        { value: 'year-2020s', label: '2020s' },
-        { value: 'year-2010s', label: '2010s' },
-        { value: 'year-2000s', label: '2000s' },
-        { value: 'year-1990s', label: '1990s' },
-        { value: 'year-1980s', label: '1980s' },
-        { value: 'year-older', label: 'Before 1980' },
-    ]
-
-    const sortOptions = [
-        { value: 'recent', label: 'Recently added' },
-        { value: 'title-asc', label: 'Title A-Z' },
-        { value: 'title-desc', label: 'Title Z-A' },
-        { value: 'year-desc', label: 'Year (newest)' },
-        { value: 'year-asc', label: 'Year (oldest)' },
-        { value: 'rating-desc', label: 'Rating (high)' },
-        { value: 'rating-asc', label: 'Rating (low)' },
-    ]
+    const isNarrowed = debouncedSearchQuery.trim() !== '' || countActiveFilters(filters) > 0
+    const libraryIsEmpty = !loading && totalMovies === 0 && !isNarrowed
 
     return (
         <div className="p-8 max-w-[1920px] mx-auto">
-            <header className="flex items-center justify-between mb-8">
+            <header className="flex items-center justify-between gap-6 mb-8">
                 <div>
-                    <h2 className="text-3xl font-bold text-white tracking-tight">Library</h2>
+                    <h1 className="text-3xl font-semibold text-white tracking-tight">Library</h1>
                     <p className="text-textMuted mt-1">
-                        {movies.length}
-                        {movies.length === 1 ? ' movie' : ' movies'}
-                        {totalMovies > movies.length ? ` of ${totalMovies}` : ''} loaded
+                        {loading ? '\u00a0' : `${totalMovies.toLocaleString()} ${totalMovies === 1 ? 'movie' : 'movies'}`}
                     </p>
                 </div>
 
@@ -219,89 +197,66 @@ export function Library() {
                     <div className="relative group">
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-textMuted group-focus-within:text-primary transition-colors" />
                         <input
+                            ref={searchInputRef}
                             type="text"
                             placeholder="Search..."
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
-                            className="bg-white/5 text-sm text-white pl-10 pr-4 py-1.5 rounded-lg border border-white/10 focus:border-white/20 focus:bg-white/10 focus:outline-none transition-all w-64 placeholder:text-textMuted/60"
+                            onKeyDown={(e) => {
+                                if (e.key === 'Escape') {
+                                    setSearchQuery('')
+                                    e.currentTarget.blur()
+                                }
+                            }}
+                            className="bg-white/5 text-sm text-white pl-10 pr-14 py-1.5 rounded-lg border border-white/10 focus:border-white/20 focus:bg-white/10 focus:outline-none transition-all w-64 placeholder:text-textMuted/60"
+                            aria-label="Search library"
                         />
-                    </div>
-                    <div className="relative" ref={filterMenuRef}>
-                        <button
-                            onClick={() => {
-                                setShowFilterMenu(!showFilterMenu)
-                                setShowSortMenu(false)
-                            }}
-                            className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${showFilterMenu || filterBy !== 'all' ? 'text-white bg-white/10' : 'text-textMuted hover:text-white hover:bg-white/5'}`}
-                            aria-label="Filter movies"
-                        >
-                            <SlidersHorizontal className="w-4 h-4" />
-                            <span>{filterOptions.find(o => o.value === filterBy)?.label}</span>
-                            <ChevronDown className={`w-3.5 h-3.5 opacity-50 transition-transform ${showFilterMenu ? 'rotate-180' : ''}`} />
-                        </button>
-                        {showFilterMenu && (
-                            <div className="absolute right-0 mt-2 w-56 bg-surface/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
-                                <div className="p-2">
-                                    {filterOptions.map(option => (
-                                        <button
-                                            key={option.value}
-                                            onClick={() => {
-                                                setFilterBy(option.value)
-                                                setShowFilterMenu(false)
-                                            }}
-                                            className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-white/10 hover:text-white rounded flex items-center justify-between transition-colors"
-                                        >
-                                            <span>{option.label}</span>
-                                            {filterBy === option.value && (
-                                                <Check className="w-3.5 h-3.5 text-green-400" />
-                                            )}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
+                        {searchQuery ? (
+                            <button
+                                onClick={() => {
+                                    setSearchQuery('')
+                                    searchInputRef.current?.focus()
+                                }}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-textMuted hover:text-white"
+                                aria-label="Clear search"
+                            >
+                                <X className="w-3.5 h-3.5" />
+                            </button>
+                        ) : (
+                            <kbd className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-[10px] font-sans text-textMuted/70 border border-white/10 rounded px-1.5 py-0.5">
+                                Ctrl K
+                            </kbd>
                         )}
                     </div>
-                    <div className="relative" ref={sortMenuRef}>
-                        <button
-                            onClick={() => {
-                                setShowSortMenu(!showSortMenu)
-                                setShowFilterMenu(false)
-                            }}
-                            className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${showSortMenu || sortBy !== 'recent' ? 'text-white bg-white/10' : 'text-textMuted hover:text-white hover:bg-white/5'}`}
-                            aria-label="Sort movies"
-                        >
-                            <ArrowUpDown className="w-4 h-4" />
-                            <span>{sortOptions.find(o => o.value === sortBy)?.label}</span>
-                            <ChevronDown className={`w-3.5 h-3.5 opacity-50 transition-transform ${showSortMenu ? 'rotate-180' : ''}`} />
-                        </button>
-                        {showSortMenu && (
-                            <div className="absolute right-0 mt-2 w-56 bg-surface/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
-                                <div className="p-2">
-                                    {sortOptions.map(option => (
-                                        <button
-                                            key={option.value}
-                                            onClick={() => {
-                                                setSortBy(option.value)
-                                                setShowSortMenu(false)
-                                            }}
-                                            className="w-full text-left px-2 py-1.5 text-sm text-gray-300 hover:bg-white/10 hover:text-white rounded flex items-center justify-between transition-colors"
-                                        >
-                                            <span>{option.label}</span>
-                                            {sortBy === option.value && (
-                                                <Check className="w-3.5 h-3.5 text-green-400" />
-                                            )}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                    </div>
+                    <MovieFilterControls
+                        filters={filters}
+                        onFiltersChange={setFilters}
+                        sortBy={sortBy}
+                        onSortChange={setSortBy}
+                    />
                 </div>
             </header>
 
+            <ActiveFilterChips filters={filters} onFiltersChange={setFilters} />
+
             {loading ? (
-                <div className="flex items-center justify-center h-64">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                <MovieGridSkeleton />
+            ) : libraryIsEmpty ? (
+                <div className="flex flex-col items-center justify-center text-center py-24">
+                    <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mb-5">
+                        <FolderPlus className="w-6 h-6 text-primary" />
+                    </div>
+                    <h2 className="text-xl font-semibold text-white">No videos yet</h2>
+                    <p className="mt-2 text-textMuted max-w-sm">
+                        Add a folder in Settings and Kino will scan it for videos.
+                    </p>
+                    <button
+                        onClick={() => navigate('/settings')}
+                        className="mt-6 flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary hover:bg-primary/90 text-white font-semibold transition-colors"
+                    >
+                        <FolderPlus className="w-4 h-4" />
+                        Add a folder
+                    </button>
                 </div>
             ) : (
                 <>
@@ -316,13 +271,14 @@ export function Library() {
                         )}
                     />
                     {movies.length === 0 && (
-                        <div className="text-center py-12 text-textMuted">
-                            <p>No movies match your search or filters.</p>
+                        <div className="text-center py-16 text-textMuted">
+                            <p className="text-white">No matches</p>
+                            <p className="text-sm mt-1">Try a different search or remove a filter.</p>
                         </div>
                     )}
                     {movies.length > 0 && hasMore && (
-                        <div className="py-6 text-center text-textMuted text-sm">
-                            {loadingMore ? 'Loading more movies...' : 'Scroll to load more'}
+                        <div className="pt-6">
+                            {loadingMore ? <MovieGridSkeleton count={4} /> : <div className="h-8" />}
                         </div>
                     )}
                 </>

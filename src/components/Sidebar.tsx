@@ -1,197 +1,138 @@
-import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { Film, Settings, MonitorPlay, ListMusic, Plus, Trash2, RefreshCw, Lock, Home } from 'lucide-react'
+import { Link, useLocation } from 'react-router-dom'
+import { Film, Settings, ListVideo, Lock, Home, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import { useCallback, useEffect, useState } from 'react'
-import { Playlist } from '../types'
-import { useCoalescedIpcRefresh } from '../hooks/useCoalescedIpcRefresh'
+
+const COLLAPSED_STORAGE_KEY = 'kino_sidebar_collapsed'
+
+function readCollapsed() {
+    try {
+        return window.localStorage.getItem(COLLAPSED_STORAGE_KEY) === '1'
+    } catch {
+        return false
+    }
+}
+
+const navItems = [
+    { path: '/', label: 'Home', icon: Home },
+    { path: '/library', label: 'Library', icon: Film },
+    { path: '/playlists', label: 'Playlists', icon: ListVideo },
+    { path: '/settings', label: 'Settings', icon: Settings },
+]
+
+function isNavItemActive(itemPath: string, pathname: string) {
+    if (itemPath === '/') return pathname === '/'
+    // Nested routes (e.g. /playlists/3) keep their section highlighted
+    return pathname === itemPath || pathname.startsWith(`${itemPath}/`)
+}
 
 export function Sidebar() {
     const location = useLocation()
-    const navigate = useNavigate()
-    const [playlists, setPlaylists] = useState<Playlist[]>([])
-    const [isCreating, setIsCreating] = useState(false)
-    const [newPlaylistName, setNewPlaylistName] = useState('')
+    const [collapsed, setCollapsed] = useState(readCollapsed)
 
-    const fetchPlaylists = useCallback(async () => {
-        const data = await window.ipcRenderer.invoke('db:get-playlists')
-        setPlaylists(data)
+    const toggleCollapsed = useCallback(() => {
+        setCollapsed(prev => {
+            const next = !prev
+            try {
+                window.localStorage.setItem(COLLAPSED_STORAGE_KEY, next ? '1' : '0')
+            } catch {
+                // Storage unavailable; the preference just won't persist.
+            }
+            return next
+        })
     }, [])
 
-    const { runNow: refreshPlaylists } = useCoalescedIpcRefresh(
-        fetchPlaylists,
-        ['playlists-updated'],
-        { delayMs: 150 }
-    )
-
+    // Ctrl/Cmd+B toggles the sidebar
     useEffect(() => {
-        void refreshPlaylists()
-    }, [refreshPlaylists])
-
-    const handleCreatePlaylist = async (e: React.FormEvent) => {
-        e.preventDefault()
-        if (!newPlaylistName.trim()) return
-
-        await window.ipcRenderer.invoke('db:create-playlist', newPlaylistName)
-        setNewPlaylistName('')
-        setIsCreating(false)
-        void refreshPlaylists()
-    }
-
-    const handleDeletePlaylist = async (e: React.MouseEvent, id: number) => {
-        e.preventDefault()
-        e.stopPropagation()
-        if (confirm('Are you sure you want to delete this playlist?')) {
-            await window.ipcRenderer.invoke('db:delete-playlist', id)
-            void refreshPlaylists()
-            if (location.pathname === `/playlists/${id}`) {
-                navigate('/')
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b' && !document.querySelector('[data-video-player]')) {
+                e.preventDefault()
+                toggleCollapsed()
             }
         }
-    }
-
-    const handleGeneratePlaylists = async () => {
-        if (confirm('Generate playlists from folders? This will group movies by their parent directory.')) {
-            const result = await window.ipcRenderer.invoke('db:generate-default-playlists')
-            alert(`Created ${result.created} playlists and added ${result.added} movies.`)
-            void refreshPlaylists()
-        }
-    }
-
-    const navItems = [
-        { path: '/', label: 'Home', icon: Home },
-        { path: '/library', label: 'Library', icon: Film },
-        { path: '/settings', label: 'Settings', icon: Settings },
-    ]
+        window.addEventListener('keydown', handleKeyDown)
+        return () => window.removeEventListener('keydown', handleKeyDown)
+    }, [toggleCollapsed])
 
     return (
-        <div className="w-64 h-full flex flex-col bg-surface/90 backdrop-blur-2xl border-r border-white/5 relative z-50">
-            {/* Logo Section */}
-            <div className="p-6 flex items-center gap-3 mb-2">
-                <div className="w-8 h-8 bg-gradient-to-br from-primary to-primary/50 rounded-lg flex items-center justify-center shadow-lg shadow-primary/20 ring-1 ring-white/10">
-                    <MonitorPlay className="w-4 h-4 text-white" />
-                </div>
-                <div>
-                    <h1 className="text-lg font-bold text-white tracking-tight leading-none">Kino</h1>
-                    <p className="text-[10px] text-textMuted font-medium uppercase tracking-wider mt-0.5">Personal Media</p>
-                </div>
+        <div
+            className={clsx(
+                'h-full flex flex-col flex-shrink-0 bg-surface/90 backdrop-blur-2xl border-r border-white/5 relative z-40 transition-[width] duration-200',
+                collapsed ? 'w-[72px]' : 'w-64'
+            )}
+        >
+            {/* Wordmark */}
+            <div className={clsx('flex items-center h-20 mb-1', collapsed ? 'justify-center' : 'justify-between pl-6 pr-3')}>
+                {!collapsed && (
+                    <Link to="/" className="rounded-md" aria-label="Kino home">
+                        <span className="text-[28px] font-semibold tracking-tight text-white leading-none">
+                            kino<span className="text-primary">.</span>
+                        </span>
+                    </Link>
+                )}
+                <button
+                    onClick={toggleCollapsed}
+                    className="p-2 rounded-lg text-textMuted hover:text-white hover:bg-white/5 transition-colors"
+                    title={collapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)'}
+                    aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                >
+                    {collapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+                </button>
             </div>
 
-            <nav className="flex-1 px-3 py-2 space-y-6 overflow-y-auto custom-scrollbar">
-                {/* Main Menu */}
+            <nav className="flex-1 px-3 py-2 overflow-y-auto overflow-x-hidden no-scrollbar">
                 <div className="space-y-1">
-                    <p className="px-3 text-[10px] font-bold text-textMuted/50 uppercase tracking-widest mb-2">Menu</p>
+                    {!collapsed && (
+                        <p className="px-3 text-[11px] font-semibold text-textMuted/60 uppercase tracking-widest mb-2">Menu</p>
+                    )}
                     {navItems.map((item) => {
-                        const isActive = location.pathname === item.path
+                        const isActive = isNavItemActive(item.path, location.pathname)
                         const Icon = item.icon
 
                         return (
                             <Link
                                 key={item.path}
                                 to={item.path}
+                                title={collapsed ? item.label : undefined}
+                                aria-current={isActive ? 'page' : undefined}
                                 className={twMerge(
                                     clsx(
-                                        "flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative overflow-hidden",
+                                        'flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative overflow-hidden',
+                                        collapsed && 'justify-center',
                                         isActive
-                                            ? "bg-white/10 text-white shadow-sm ring-1 ring-white/5"
-                                            : "text-textMuted hover:bg-white/5 hover:text-white"
+                                            ? 'bg-white/10 text-white shadow-sm ring-1 ring-white/5'
+                                            : 'text-textMuted hover:bg-white/5 hover:text-white'
                                     )
                                 )}
                             >
                                 {isActive && (
                                     <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-primary rounded-r-full" />
                                 )}
-                                <Icon className={clsx("w-4 h-4 transition-colors", isActive ? "text-primary" : "text-textMuted group-hover:text-white")} />
-                                <span className="font-medium text-sm">{item.label}</span>
+                                <Icon className={clsx('w-4 h-4 flex-shrink-0 transition-colors', isActive ? 'text-primary' : 'text-textMuted group-hover:text-white')} />
+                                {!collapsed && <span className="font-medium text-sm">{item.label}</span>}
                             </Link>
                         )
                     })}
-                </div>
-
-                {/* Playlists */}
-                <div className="space-y-1">
-                    <div className="px-3 mb-2">
-                        <div className="flex items-center justify-between mb-2">
-                            <p className="text-[10px] font-bold text-textMuted/50 uppercase tracking-widest">Playlists</p>
-                            <button
-                                onClick={handleGeneratePlaylists}
-                                className="text-textMuted hover:text-primary transition-colors p-1 hover:bg-white/5 rounded"
-                                title="Refresh playlists"
-                            >
-                                <RefreshCw className="w-3 h-3" />
-                            </button>
-                        </div>
-                        <button
-                            onClick={() => setIsCreating(true)}
-                            className="flex items-center gap-3 px-3 py-2 w-full rounded-lg text-textMuted hover:bg-white/5 hover:text-white transition-all duration-200 group border border-dashed border-white/10 hover:border-white/20"
-                        >
-                            <div className="w-4 h-4 flex items-center justify-center rounded bg-white/5 group-hover:bg-white/10 transition-colors">
-                                <Plus className="w-3 h-3" />
-                            </div>
-                            <span className="font-medium text-sm">New Playlist</span>
-                        </button>
-                    </div>
-
-                    {isCreating && (
-                        <form onSubmit={handleCreatePlaylist} className="px-3 mb-2">
-                            <input
-                                type="text"
-                                value={newPlaylistName}
-                                onChange={(e) => setNewPlaylistName(e.target.value)}
-                                placeholder="Playlist name..."
-                                className="w-full bg-black/20 text-white text-sm px-3 py-1.5 rounded-md border border-white/10 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 focus:outline-none placeholder:text-textMuted/50 transition-all"
-                                autoFocus
-                                onBlur={() => !newPlaylistName && setIsCreating(false)}
-                            />
-                        </form>
-                    )}
-
-                    <div className="space-y-0.5">
-                        {playlists.map((playlist) => {
-                            const isActive = location.pathname === `/playlists/${playlist.id}`
-                            return (
-                                <Link
-                                    key={playlist.id}
-                                    to={`/playlists/${playlist.id}`}
-                                    className={twMerge(
-                                        clsx(
-                                            "flex items-center justify-between px-3 py-2 rounded-lg transition-all duration-200 group relative",
-                                            isActive
-                                                ? "bg-white/5 text-white"
-                                                : "text-textMuted hover:bg-white/5 hover:text-white"
-                                        )
-                                    )}
-                                >
-                                    <div className="flex items-center gap-3 overflow-hidden">
-                                        <ListMusic className={clsx("w-4 h-4 flex-shrink-0 transition-colors", isActive ? "text-primary" : "text-textMuted group-hover:text-primary")} />
-                                        <span className="font-medium text-sm truncate">{playlist.name}</span>
-                                    </div>
-                                    <button
-                                        onClick={(e) => handleDeletePlaylist(e, playlist.id)}
-                                        className="opacity-0 group-hover:opacity-100 text-textMuted hover:text-red-400 transition-all duration-200 p-1 hover:bg-white/5 rounded"
-                                    >
-                                        <Trash2 className="w-3 h-3" />
-                                    </button>
-                                </Link>
-                            )
-                        })}
-                    </div>
                 </div>
             </nav>
 
             {/* Footer */}
             <div className="p-4 border-t border-white/5">
-                <div className="flex items-center justify-between">
+                <div className={clsx('flex items-center', collapsed ? 'flex-col gap-2' : 'justify-between')}>
                     <Link
                         to="/secure"
                         className="text-textMuted/40 hover:text-textMuted transition-colors p-1 rounded hover:bg-white/5"
                         title="Secure Folder"
+                        aria-label="Secure Folder"
                     >
                         <Lock className="w-3.5 h-3.5" />
                     </Link>
-                    <p className="text-[10px] text-textMuted/30 font-medium hover:text-textMuted transition-colors cursor-default">
-                        v0.1.0
-                    </p>
+                    {!collapsed && (
+                        <p className="text-[10px] text-textMuted/30 font-medium hover:text-textMuted transition-colors cursor-default">
+                            v{__APP_VERSION__}
+                        </p>
+                    )}
                 </div>
             </div>
         </div>

@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { WatchPath } from '../types'
 import { FolderPlus, Trash2, RefreshCw, Folder } from 'lucide-react'
+import { useFeedback } from '../components/Feedback'
 
 function PathMarquee({ text }: { text: string }) {
     const wrapperRef = useRef<HTMLDivElement | null>(null)
@@ -34,6 +35,7 @@ function PathMarquee({ text }: { text: string }) {
 }
 
 export function Settings() {
+    const { confirm, toast } = useFeedback()
     const [watchPaths, setWatchPaths] = useState<WatchPath[]>([])
     const [loading, setLoading] = useState(true)
     const [regenerating, setRegenerating] = useState(false)
@@ -60,19 +62,30 @@ export function Settings() {
                 await window.ipcRenderer.invoke('db:add-watch-path', result)
                 await window.ipcRenderer.invoke('watcher:update')
                 fetchWatchPaths()
+                toast('Folder added — scanning for videos')
             }
         } catch (err) {
             console.error('Error adding watch path:', err)
+            toast('Couldn’t add that folder', 'error')
         }
     }
 
-    const handleRemovePath = async (id: number) => {
+    const handleRemovePath = async (watchPath: WatchPath) => {
+        const ok = await confirm({
+            title: 'Remove this folder?',
+            message: `Videos from ${watchPath.path} will be removed from your library. The files on disk are not touched.`,
+            confirmLabel: 'Remove folder',
+            destructive: true,
+        })
+        if (!ok) return
         try {
-            await window.ipcRenderer.invoke('db:remove-watch-path', id)
+            await window.ipcRenderer.invoke('db:remove-watch-path', watchPath.id)
             await window.ipcRenderer.invoke('watcher:update')
             fetchWatchPaths()
+            toast('Folder removed')
         } catch (err) {
             console.error('Error removing watch path:', err)
+            toast('Couldn’t remove that folder', 'error')
         }
     }
 
@@ -86,7 +99,7 @@ export function Settings() {
 
     return (
         <div className="p-8 max-w-4xl mx-auto">
-            <h1 className="text-3xl font-bold text-white mb-8 tracking-tight">Settings</h1>
+            <h1 className="text-3xl font-semibold text-white mb-8 tracking-tight">Settings</h1>
 
             {/* Watch Paths Section */}
             <section className="mb-12">
@@ -123,9 +136,10 @@ export function Settings() {
                                         </div>
                                     </div>
                                     <button
-                                        onClick={() => handleRemovePath(path.id)}
+                                        onClick={() => handleRemovePath(path)}
                                         className="p-2 text-textMuted hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-colors"
                                         title="Remove folder"
+                                        aria-label={`Remove folder ${path.path}`}
                                     >
                                         <Trash2 className="w-4 h-4" />
                                     </button>
@@ -157,11 +171,11 @@ export function Settings() {
                                 try {
                                     setRegenerating(true)
                                     const result = await window.ipcRenderer.invoke('thumbnails:regenerate')
-                                    alert(`Queued ${result.queued} / ${result.total} thumbnails`)
+                                    toast(`Queued ${result.queued} of ${result.total} thumbnails`)
                                     fetchWatchPaths() // Trigger refresh
                                 } catch (err) {
                                     console.error('Error regenerating thumbnails:', err)
-                                    alert('Failed to regenerate thumbnails')
+                                    toast('Failed to regenerate thumbnails', 'error')
                                 } finally {
                                     setRegenerating(false)
                                 }
