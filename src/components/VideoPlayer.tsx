@@ -409,7 +409,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     useEffect(() => {
         const savedVolume = localStorage.getItem('kino_volume')
         if (savedVolume !== null) {
-            const vol = parseFloat(savedVolume)
+            // Older builds could save values above 1; the media element throws on those.
+            const parsed = parseFloat(savedVolume)
+            const vol = Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 1
             setVolume(vol)
             setIsMuted(vol === 0)
             if (videoRef.current) {

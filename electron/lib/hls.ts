@@ -235,11 +235,13 @@ class HlsSession {
             '-hls_list_size', '0',
             // Segments are written as .tmp and renamed when complete, so an existing file is a finished one.
             '-hls_flags', 'temp_file',
-            '-hls_segment_filename', path.join(this.dir, 'seg_%d.m4s'),
-            path.join(this.dir, `run_${id}.m3u8`),
+            // Output names are relative to cwd: ffmpeg places the init segment beside the playlist by
+            // splitting its path on '/' only, so a Windows path would put it in the working directory.
+            '-hls_segment_filename', 'seg_%d.m4s',
+            `run_${id}.m3u8`,
         ]
 
-        const proc = spawn(profile.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+        const proc = spawn(profile.ffmpegPath, args, { cwd: this.dir, stdio: ['ignore', 'ignore', 'pipe'] })
         const run: EncoderRun = {
             id, proc, profile, start, next: start, initPath: path.join(this.dir, initName),
             producedAny: false, paused: false, exited: false, stopped: false, stderr: '',
