@@ -337,10 +337,18 @@ async function sessionFor(token: string): Promise<HlsSession | null> {
 }
 
 /** Close all sessions (player closed or app quitting); late requests for them are refused. */
-export function stopHlsSessions() {
+export function stopHlsSessions(): Promise<void> {
     for (const source of sources.values()) source.closed = true
-    void current?.destroy()
+    const session = current
     current = null
+    return session?.destroy() ?? Promise.resolve()
+}
+
+/** On quit: stop all sessions and remove this process's segment folder. */
+export async function removeHlsFiles() {
+    await stopHlsSessions()
+    // A replaced session's ffmpeg may still be exiting; Windows can't delete files it holds open.
+    await fs.promises.rm(PROCESS_DIR, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => undefined)
 }
 
 export async function handleHlsRequest(url: URL): Promise<Response> {

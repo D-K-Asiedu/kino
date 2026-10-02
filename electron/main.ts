@@ -6,7 +6,7 @@ import { initDB } from './lib/database'
 import { registerIPC } from './lib/ipc'
 import { startWatcher } from './lib/watcher'
 import { generateDefaultPlaylists } from './lib/playlists'
-import { handleStreamRequest, stopAllStreams, warmUpEncoders } from './lib/streaming'
+import { handleStreamRequest, shutdownStreams, warmUpEncoders } from './lib/streaming'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -117,8 +117,17 @@ function createWindow() {
   }
 }
 
-app.on('before-quit', () => {
-  stopAllStreams()
+let streamsShutDown = false
+
+app.on('before-quit', (event) => {
+  if (streamsShutDown) return
+  // Hold the quit until ffmpeg has exited and the HLS temp folder is removed, but never for long.
+  event.preventDefault()
+  const timeout = new Promise(resolve => setTimeout(resolve, 3000))
+  void Promise.race([shutdownStreams(), timeout]).finally(() => {
+    streamsShutDown = true
+    app.quit()
+  })
 })
 
 app.on('window-all-closed', () => {

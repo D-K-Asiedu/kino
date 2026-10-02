@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from 'child_process'
 import { Readable } from 'stream'
 import { EncoderProfile, bundledFfmpegPath, describeProfile, getEncoderProfiles } from './encoders'
 import { AUDIO_ARGS, HWACCEL_FALLBACK_MESSAGES, MediaDetails, buildVideoArgs, getMediaDetails, profilesForFile, rememberWorkingProfile } from './media'
-import { handleHlsRequest, stopHlsSessions } from './hls'
+import { handleHlsRequest, removeHlsFiles, stopHlsSessions } from './hls'
 
 // Progressive conversion: ffmpeg writes one fragmented MP4 to stdout, which is streamed to the
 // player. Used when the video stream is copied (only audio/container need converting), since copied
@@ -27,7 +27,13 @@ function stopProgressiveStreams() {
 
 export function stopAllStreams() {
     stopProgressiveStreams()
-    stopHlsSessions()
+    void stopHlsSessions()
+}
+
+/** Stop all conversions and remove their temp files; resolves once that is done (for quitting). */
+export async function shutdownStreams() {
+    stopProgressiveStreams()
+    await removeHlsFiles()
 }
 
 /** Start encoder detection early so the first converted video doesn't wait for it. */
