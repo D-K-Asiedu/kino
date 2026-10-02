@@ -23,10 +23,15 @@ const VIDEO_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv']
 export function startWatcher() {
     const paths = db.getWatchPaths().map((row: any) => row.path)
 
-    if (paths.length === 0) return
-
+    // Close before the empty check so removing the last folder stops watching it
     if (watcher) {
         watcher.close()
+        watcher = null
+    }
+
+    if (paths.length === 0) {
+        pruneMoviesOutsideWatchPaths()
+        return
     }
 
     watcher = watch(paths, {
@@ -55,6 +60,7 @@ export function startWatcher() {
 
 async function syncLibrary() {
     console.log('Watcher: Syncing library...')
+    pruneMoviesOutsideWatchPaths()
     const movies = db.getMovies()
     const knownMoviePaths = new Set((movies as any[]).map((movie) => movie.file_path as string))
     const watchPaths = db.getWatchPaths().map((row: any) => row.path)
@@ -155,6 +161,19 @@ async function syncLibrary() {
 
 export function updateWatcher() {
     startWatcher()
+}
+
+// Drops movies no longer covered by any watch folder (e.g. after a folder is removed).
+// Playlist regeneration then deletes any playlists this leaves empty.
+export function pruneMoviesOutsideWatchPaths() {
+    const removed = db.removeMoviesOutsideWatchPaths()
+    if (removed.length === 0) return
+
+    for (const movie of removed) {
+        void deleteThumbnailForMovie(movie.id)
+    }
+    scheduleLibraryUpdate()
+    schedulePlaylistUpdate()
 }
 
 export function triggerMetadataProcessing() {

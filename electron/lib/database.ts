@@ -348,35 +348,34 @@ export function getMovieByPath(filePath: string) {
   return cachedStmt('SELECT * FROM movies WHERE file_path = ?').get(filePath) as any | undefined
 }
 
-export function getMoviesByWatchPath(watchPath: string) {
-  const normalizedPath = watchPath.endsWith(path.sep) ? watchPath : watchPath + path.sep
-  return getDB().prepare(`
-    SELECT * FROM movies
-    WHERE file_path LIKE ? ESCAPE '\\'
-       OR file_path = ?
-  `).all(`${normalizedPath.replace(/[%_]/g, '\\$&')}%`, watchPath)
+// Compared in JS rather than with SQL LIKE: Windows paths are full of backslashes, which
+// LIKE ... ESCAPE '\' treats as escape characters. path.relative also handles mixed
+// separators, trailing separators, drive roots, and is case-insensitive on win32.
+function isPathInside(filePath: string, dirPath: string) {
+  const relative = path.relative(dirPath, filePath)
+  if (relative === '') return true
+  return !path.isAbsolute(relative) && relative.split(path.sep)[0] !== '..'
+}
+
+export function removeMoviesOutsideWatchPaths() {
+  const watchPaths = (getWatchPaths() as { path: string }[]).map((row) => row.path)
+  const movies = cachedStmt('SELECT id, file_path FROM movies').all() as { id: number; file_path: string }[]
+  const orphaned = movies.filter((movie) => !watchPaths.some((watchPath) => isPathInside(movie.file_path, watchPath)))
+  if (orphaned.length === 0) return orphaned
+
+  const remove = cachedStmt('DELETE FROM movies WHERE id = ?')
+  getDB().transaction(() => {
+    for (const movie of orphaned) remove.run(movie.id)
+  })()
+
+  console.log('Database: Removed', orphaned.length, 'movies outside watch paths')
+  return orphaned
 }
 
 export function removeMovieByPath(filePath: string) {
   console.log('Database: Attempting to remove movie with path:', filePath)
   const result = cachedStmt('DELETE FROM movies WHERE file_path = ?').run(filePath)
   console.log('Database: Removal result:', result)
-  return result
-}
-
-export function removeMoviesByWatchPath(watchPath: string) {
-  // Normalize the path and add trailing separator to ensure we match the exact folder
-  const normalizedPath = watchPath.endsWith(path.sep) ? watchPath : watchPath + path.sep
-  console.log('Database: Removing movies from watch path:', normalizedPath)
-
-  // Use LIKE with escape for paths starting with the watch path
-  const result = getDB().prepare(`
-    DELETE FROM movies 
-    WHERE file_path LIKE ? ESCAPE '\\'
-       OR file_path = ?
-  `).run(`${normalizedPath.replace(/[%_]/g, '\\$&')}%`, watchPath)
-
-  console.log('Database: Removed', result.changes, 'movies from watch path')
   return result
 }
 

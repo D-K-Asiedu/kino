@@ -1,8 +1,6 @@
-import { ipcMain, dialog, app } from 'electron'
-import path from 'path'
-import fs from 'fs-extra'
+import { ipcMain, dialog } from 'electron'
 import * as db from './database'
-import { updateWatcher, triggerMetadataProcessing } from './watcher'
+import { updateWatcher, triggerMetadataProcessing, pruneMoviesOutsideWatchPaths } from './watcher'
 import {
     getSecureStatus,
     setSecurePassword,
@@ -31,20 +29,10 @@ export function registerIPC() {
     ipcMain.handle('db:get-watch-paths', () => db.getWatchPaths())
     ipcMain.handle('db:add-watch-path', (_, path) => db.addWatchPath(path))
     ipcMain.handle('db:remove-watch-path', (_, id) => {
-        // Get the watch path before removing it
-        const watchPath = db.getWatchPathById(id)
-        if (watchPath) {
-            // Remove all movies from this watch path
-            const movies = db.getMoviesByWatchPath(watchPath.path)
-            db.removeMoviesByWatchPath(watchPath.path)
-            for (const movie of movies) {
-                if ((movie as any).id) {
-                    void deleteThumbnailForMovie((movie as any).id)
-                }
-            }
-            console.log(`Removed movies from watch path: ${watchPath.path}`)
-        }
-        return db.removeWatchPath(id)
+        const result = db.removeWatchPath(id)
+        // Movies still covered by another (overlapping) watch folder are kept
+        pruneMoviesOutsideWatchPaths()
+        return result
     })
     ipcMain.handle('settings:get', (_, key) => db.getSetting(key))
     ipcMain.handle('settings:set', (_, key, value) => db.setSetting(key, value))
@@ -213,14 +201,4 @@ export function registerIPC() {
         const path = await getSecureThumbnail(itemId)
         return { path }
     })
-}
-
-async function deleteThumbnailForMovie(movieId: number | bigint) {
-    try {
-        const thumbnailsDir = path.join(app.getPath('userData'), 'thumbnails')
-        const thumbnailPath = path.join(thumbnailsDir, `${movieId}.jpg`)
-        await fs.remove(thumbnailPath)
-    } catch (err) {
-        console.error('Failed to delete thumbnail for movie', movieId, err)
-    }
 }
