@@ -16,14 +16,14 @@ import { AUDIO_ARGS, HWACCEL_FALLBACK_MESSAGES, MediaDetails, buildVideoArgs, ge
 export const SEGMENT_SECONDS = 3
 // A request this many segments past what the encoder is working on waits for it; further restarts it.
 const MAX_WAIT_AHEAD = 2
-// The encoder pauses once it is this many segments past the player's latest request (~60s).
+// The encoder pauses (or, on Windows, stops) once it is this many segments past the player's latest request (~60s).
 const MAX_ENCODE_AHEAD = 20
 // Sessions nobody has requested anything from for this long are removed (encoder and segments).
 const IDLE_TIMEOUT_MS = 2 * 60 * 1000
 const POLL_MS = 100
 
 const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*' }
-// Pausing the encoder relies on SIGSTOP/SIGCONT, which Windows doesn't have.
+// Pausing the encoder relies on SIGSTOP/SIGCONT, which Windows doesn't have; there it is stopped and restarted.
 const CAN_PAUSE = process.platform !== 'win32'
 
 const HLS_ROOT = path.join(os.tmpdir(), 'kino-hls')
@@ -296,9 +296,15 @@ class HlsSession {
                 }
             }
         }
-        if (CAN_PAUSE && !run.exited && !run.paused && run.next - 1 - this.lastRequested > MAX_ENCODE_AHEAD) {
-            run.proc.kill('SIGSTOP')
-            run.paused = true
+        if (!run.exited && !run.paused && run.next - 1 - this.lastRequested > MAX_ENCODE_AHEAD) {
+            if (CAN_PAUSE) {
+                run.proc.kill('SIGSTOP')
+                run.paused = true
+            } else {
+                // No SIGSTOP on Windows: stop instead. The player asks for the first missing segment
+                // while it still has ~30s buffered, and runFor() starts a new run there.
+                this.stopRun(run)
+            }
         }
     }
 

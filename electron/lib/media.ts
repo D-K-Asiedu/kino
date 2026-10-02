@@ -7,13 +7,14 @@ import { EncoderProfile, LIBPLACEBO_TONEMAP, ZSCALE_TONEMAP } from './encoders'
 
 // Probing and ffmpeg arguments shared by the progressive stream (streaming.ts) and HLS (hls.ts).
 
-// Chromium (and therefore Electron) can only decode a limited set of codecs. HEVC/H.265 has no
-// decoder in Electron's Chromium build on Linux, and AC3/E-AC3/DTS audio is not supported anywhere.
-// Files outside this set are converted on the fly with ffmpeg.
-const SUPPORTED_VIDEO_CODECS = new Set(['h264', 'vp8', 'vp9', 'av1'])
-// 10-bit H.264 (Hi10P) is not decodable by Chromium; VP9/AV1 10-bit are.
-const SUPPORTED_H264_PIX_FMTS = new Set(['yuv420p', 'yuvj420p'])
-const SUPPORTED_AUDIO_CODECS = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac'])
+// Chromium (and therefore Electron) can only decode a limited set of codecs. The baseline below is
+// decodable everywhere. What else works depends on the platform and GPU (HEVC on macOS and many
+// Windows machines, never on Linux), so the player reports it at startup (setDecoderSupport). Files
+// outside the supported set are converted on the fly with ffmpeg.
+const BASELINE_VIDEO_CODECS = new Set(['vp8', 'vp9', 'av1'])
+const PIX_FMTS_8BIT = new Set(['yuv420p', 'yuvj420p'])
+const PIX_FMTS_10BIT = new Set(['yuv420p10le'])
+const BASELINE_AUDIO_CODECS = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac'])
 const DIRECT_CONTAINERS = new Set(['.mp4', '.m4v', '.mov', '.webm', '.mkv'])
 const HDR_TRANSFERS = new Set(['smpte2084', 'arib-std-b67'])
 
@@ -47,14 +48,43 @@ export interface MediaDetails {
     startTime: number
     isHdr: boolean
     height: number
+    videoCodec: string | null
+    /** Reordered frames; ffmpeg adjusts -ss for these (see streaming.ts buildArgs). */
+    videoHasBFrames: boolean
+}
+
+/** Codecs beyond the baseline that the player can decode on this machine (see src/lib/decoderSupport.ts). */
+export interface DecoderSupport {
+    hevc: boolean
+    hevc10: boolean
+    h264_10bit: boolean
+    ac3: boolean
+    eac3: boolean
+    dts: boolean
+}
+
+const DECODER_SUPPORT_KEYS: (keyof DecoderSupport)[] = ['hevc', 'hevc10', 'h264_10bit', 'ac3', 'eac3', 'dts']
+const OPTIONAL_AUDIO_CODECS: Record<string, keyof DecoderSupport> = { ac3: 'ac3', eac3: 'eac3', dts: 'dts' }
+
+// Until the player reports in, only the baseline counts as supported.
+let decoderSupport: Partial<DecoderSupport> = {}
+
+export function setDecoderSupport(support: unknown) {
+    const reported = (support ?? {}) as Record<string, unknown>
+    decoderSupport = Object.fromEntries(DECODER_SUPPORT_KEYS.map(key => [key, reported[key] === true]))
+    console.log('[media] decoder support:', DECODER_SUPPORT_KEYS.filter(key => decoderSupport[key]).join(', ') || 'baseline only')
 }
 
 interface ProbeCacheEntry {
     mtimeMs: number
-    details: MediaDetails
+    data: ffmpeg.FfprobeData
 }
 
+// Raw ffprobe output; the playback decision is made per call, since decoder support and failures change.
 const probeCache = new Map<string, ProbeCacheEntry>()
+
+// How far each file has fallen back this session after playback failed in the player (see forceConversion).
+const playbackFailures = new Map<string, number>()
 
 function ffprobe(filePath: string): Promise<ffmpeg.FfprobeData> {
     return new Promise((resolve, reject) => {
@@ -64,48 +94,86 @@ function ffprobe(filePath: string): Promise<ffmpeg.FfprobeData> {
 
 function isVideoStreamSupported(stream: ffmpeg.FfprobeStream | undefined) {
     if (!stream?.codec_name) return false
-    if (!SUPPORTED_VIDEO_CODECS.has(stream.codec_name)) return false
-    if (stream.codec_name === 'h264' && stream.pix_fmt && !SUPPORTED_H264_PIX_FMTS.has(stream.pix_fmt)) return false
-    return true
+    if (BASELINE_VIDEO_CODECS.has(stream.codec_name)) return true
+    const pixFmt = stream.pix_fmt ?? ''
+    if (stream.codec_name === 'h264') {
+        return !pixFmt || PIX_FMTS_8BIT.has(pixFmt) || (!!decoderSupport.h264_10bit && PIX_FMTS_10BIT.has(pixFmt))
+    }
+    if (stream.codec_name === 'hevc') {
+        return (!!decoderSupport.hevc && PIX_FMTS_8BIT.has(pixFmt)) || (!!decoderSupport.hevc10 && PIX_FMTS_10BIT.has(pixFmt))
+    }
+    return false
 }
 
-export async function getMediaDetails(filePath: string): Promise<MediaDetails> {
-    const stats = await fs.promises.stat(filePath)
-    const cached = probeCache.get(filePath)
-    if (cached && cached.mtimeMs === stats.mtimeMs) return cached.details
+function isAudioCodecSupported(codec: string) {
+    if (BASELINE_AUDIO_CODECS.has(codec)) return true
+    const key = OPTIONAL_AUDIO_CODECS[codec]
+    return !!key && !!decoderSupport[key]
+}
 
-    const data = await ffprobe(filePath)
+// Playback options from cheapest to most work. A failure moves a file one step down.
+const Level = { Direct: 0, CopyVideo: 1, Reencode: 2 } as const
+
+function decidePlayback(filePath: string, data: ffmpeg.FfprobeData): { info: PlaybackInfo, video: ffmpeg.FfprobeStream | undefined } {
     // Ignore embedded cover art, which ffprobe reports as a video stream.
     const video = data.streams.find(s => s.codec_type === 'video' && s.disposition?.attached_pic !== 1)
     const audio = data.streams.find(s => s.codec_type === 'audio')
     const duration = Number(data.format?.duration) || 0
 
     const videoOk = isVideoStreamSupported(video)
-    const audioOk = !audio || SUPPORTED_AUDIO_CODECS.has(audio.codec_name ?? '')
+    const audioOk = !audio || isAudioCodecSupported(audio.codec_name ?? '')
     const containerOk = DIRECT_CONTAINERS.has(path.extname(filePath).toLowerCase())
 
-    let info: PlaybackInfo
-    if (videoOk && audioOk && containerOk) {
-        info = { mode: 'direct', duration, copyVideo: true, hls: false, reason: null }
-    } else {
-        const problems = [
-            !videoOk && `video codec ${video?.codec_name ?? 'unknown'}${video?.pix_fmt ? ` (${video.pix_fmt})` : ''}`,
-            !audioOk && `audio codec ${audio?.codec_name}`,
-            !containerOk && `container ${path.extname(filePath)}`,
-        ].filter(Boolean)
-        // The HLS playlist is laid out from the duration, so it's needed up front.
-        const hls = !videoOk && duration > 0
-        info = { mode: 'transcode', duration, copyVideo: videoOk, hls, reason: `Unsupported ${problems.join(', ')}` }
+    const natural = videoOk && audioOk && containerOk ? Level.Direct : videoOk ? Level.CopyVideo : Level.Reencode
+    const level = Math.min(Level.Reencode, natural + (playbackFailures.get(filePath) ?? 0))
+
+    if (level === Level.Direct) return { info: { mode: 'direct', duration, copyVideo: true, hls: false, reason: null }, video }
+
+    const problems = [
+        !videoOk && `video codec ${video?.codec_name ?? 'unknown'}${video?.pix_fmt ? ` (${video.pix_fmt})` : ''}`,
+        !audioOk && `audio codec ${audio?.codec_name}`,
+        !containerOk && `container ${path.extname(filePath)}`,
+    ].filter(Boolean)
+    const reason = level > natural
+        ? `${natural === Level.Direct ? 'Direct playback' : 'Copying the video'} failed in the player`
+        : `Unsupported ${problems.join(', ')}`
+    // Copied video can only be cut at keyframes, so only re-encoded video uses HLS. Its playlist is
+    // laid out from the duration, so that's needed up front.
+    const copyVideo = level === Level.CopyVideo
+    return { info: { mode: 'transcode', duration, copyVideo, hls: !copyVideo && duration > 0, reason }, video }
+}
+
+export async function getMediaDetails(filePath: string): Promise<MediaDetails> {
+    const stats = await fs.promises.stat(filePath)
+    let cached = probeCache.get(filePath)
+    if (!cached || cached.mtimeMs !== stats.mtimeMs) {
+        cached = { mtimeMs: stats.mtimeMs, data: await ffprobe(filePath) }
+        probeCache.set(filePath, cached)
     }
 
-    const details: MediaDetails = {
+    const { info, video } = decidePlayback(filePath, cached.data)
+    return {
         info,
-        startTime: Number(data.format?.start_time) || 0,
+        startTime: Number(cached.data.format?.start_time) || 0,
         isHdr: HDR_TRANSFERS.has(String(video?.color_transfer ?? '')),
         height: Number(video?.height) || 0,
+        videoCodec: video?.codec_name ?? null,
+        videoHasBFrames: Number(video?.has_b_frames) > 0,
     }
-    probeCache.set(filePath, { mtimeMs: stats.mtimeMs, details })
-    return details
+}
+
+/**
+ * The player couldn't play the file the way getMediaDetails chose: fall back one step (direct ->
+ * copy the video -> re-encode) for the rest of the session. Returns the new playback info, or null
+ * when the file is already fully re-encoded and there is nothing left to try.
+ */
+export async function forceConversion(filePath: string): Promise<PlaybackInfo | null> {
+    const { info } = await getMediaDetails(filePath)
+    if (info.mode === 'transcode' && !info.copyVideo) return null
+    playbackFailures.set(filePath, (playbackFailures.get(filePath) ?? 0) + 1)
+    const next = (await getMediaDetails(filePath)).info
+    console.warn(`[media] ${info.mode === 'direct' ? 'direct playback' : 'copied video'} failed, falling back to ${next.copyVideo ? 'copying the video' : 're-encoding'}: ${filePath}`)
+    return next
 }
 
 export async function getPlaybackInfo(filePath: string): Promise<PlaybackInfo> {
@@ -201,6 +269,10 @@ export function buildVideoArgs(profile: EncoderProfile, media: MediaDetails, opt
         ? [
             '-force_key_frames', `expr:gte(t,n_forced*${options.segmentSeconds})`, '-g', '720',
             ...(profile.encoder === 'libx264' ? ['-sc_threshold', '0'] : []),
+            // Segments from different runs end up side by side in the player (seeking back, and on
+            // Windows every restart). B-frames shift timestamps differently per run, which leaves
+            // holes where they meet, so HLS output has none.
+            ...(profile.encoder === 'vp9_vaapi' ? [] : ['-bf', '0']),
         ]
         // Short GOPs keep fragments small, so the first frame arrives quickly.
         : ['-g', '48']

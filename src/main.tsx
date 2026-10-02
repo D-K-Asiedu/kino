@@ -3,6 +3,9 @@ import ReactDOM from 'react-dom/client'
 import App from './App.tsx'
 import '@fontsource-variable/outfit'
 import './style.css'
+import { reportDecoderSupport } from './lib/decoderSupport'
+
+reportDecoderSupport()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>

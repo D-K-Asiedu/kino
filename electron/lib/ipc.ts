@@ -120,6 +120,16 @@ export function registerIPC() {
         return getPlaybackInfo(filePath)
     })
 
+    ipcMain.handle('media:set-decoder-support', async (_, support: unknown) => {
+        const { setDecoderSupport } = await import('./media')
+        setDecoderSupport(support)
+    })
+
+    ipcMain.handle('media:force-conversion', async (_, filePath: string) => {
+        const { forceConversion } = await import('./media')
+        return forceConversion(filePath)
+    })
+
     ipcMain.handle('media:resolve-stream-start', async (_, filePath: string, start: number) => {
         const { resolveStreamStart } = await import('./media')
         return resolveStreamStart(filePath, start)

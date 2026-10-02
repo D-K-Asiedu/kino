@@ -2,7 +2,7 @@
 
 Kino ships for Linux, Windows and macOS. The current conversion pipeline was built and tested only on Linux (Intel Iris Xe, a library of HEVC files ≤1080p). This plan covers the changes needed for it to work well on every platform, and how to test them on Windows.
 
-Status: Phase 0 is done on Windows (2026-10-02). The baseline passes after three fixes, listed under [Phase 0 findings](#phase-0-findings). Phases 1–7 are not implemented yet. Work through them in order; each one ends with a test checklist.
+Status: Phase 0 is done on Windows (2026-10-02). The baseline passes after three fixes, listed under [Phase 0 findings](#phase-0-findings). Phases 1 and 2 are done on Windows (2026-10-02); their Linux checks haven't been run yet. Phases 3–7 are not implemented. Work through them in order; each one ends with a test checklist.
 
 ## How playback works today
 
@@ -95,12 +95,16 @@ In the renderer, `window.ipcRenderer.invoke('db:add-watch-path', '<test media fo
 
 **Problem:** `hls.ts` pauses ffmpeg with `SIGSTOP`/`SIGCONT`, which don't exist on Windows (`CAN_PAUSE` is false there), so the whole movie is converted in the background at full speed.
 
-**Change** (`electron/lib/hls.ts`, `collect()`): when the run is more than `MAX_ENCODE_AHEAD` segments past `lastRequested` and `CAN_PAUSE` is false, **stop the run** (`stopRun(run)`) instead of pausing it. Nothing else is needed: the next segment request past the cached block finds no running encoder, and `runFor()` starts a new run there. hls.js asks for that segment while it still has ~30s buffered, so the restart (~1s) is hidden. Keep `SIGSTOP` on Linux/macOS — resuming is cheaper than restarting.
+**Change** (`electron/lib/hls.ts`, `collect()`): when the run is more than `MAX_ENCODE_AHEAD` segments past `lastRequested` and `CAN_PAUSE` is false, **stop the run** (`stopRun(run)`) instead of pausing it. The next segment request past the cached block finds no running encoder, and `runFor()` starts a new run there. hls.js asks for that segment while it still has ~30s buffered, so the restart (~1s) is hidden. Keep `SIGSTOP` on Linux/macOS — resuming is cheaper than restarting.
+
+**Done (2026-10-02).** "Nothing else is needed" turned out to be wrong. Each restart puts segments from two ffmpeg runs side by side in the player, and with B-frames the runs' timestamps don't line up. The new run's first segment overlapped the old run's last one; Chromium then dropped the old frames that depended on the replaced ones, leaving a ~0.14s hole. hls.js only bridges holes up to 0.1s (`maxBufferHole`), so it stopped fetching at the hole and playback stalled there. **Fix** (`media.ts` `buildVideoArgs()`): HLS output is encoded with `-bf 0`. The same junctions also occur on Linux when you seek back into segments from an earlier run, so this applies on every platform.
 
 **Test (Windows):**
 
-- [ ] Play `xvid.avi` for 2+ minutes. `ffmpeg.exe` disappears from Task Manager about 60s ahead of playback and reappears as playback approaches the end of the cached segments, with no stall.
-- [ ] Segment count in `%TEMP%\kino-hls` grows in steps, not all at once.
+- [x] Play `xvid.avi` for 2+ minutes. `ffmpeg.exe` disappears from Task Manager about 60s ahead of playback and reappears as playback approaches the end of the cached segments, with no stall. Tested with a 10-minute XviD at 4× speed for 90s: 3 stop/restart cycles, 0 stalls, buffer steady at ~30s in a single range.
+- [x] Segment count in `%TEMP%\kino-hls` grows in steps, not all at once.
+
+When testing through the Chrome DevTools Protocol, keep the Electron window visible, or launch it with `--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=BackgroundVideoTrackOptimization,BackgroundVideoPauseOptimization,CalculateNativeWinOcclusion`. A hidden window throttles timers and stops decoding video, which makes seeks look stuck.
 
 ## Phase 2 — Decoder detection and fallback (list items 1 and 2)
 
@@ -140,13 +144,24 @@ These ship together: detection decides more files can play directly, and fallbac
 3. The player re-runs its mode selection at the remembered position (reuse the `init` logic; factor the mode choice out of the effect).
 4. Guard against loops: at most one fallback step per error, and stop after HLS. A missing file (ffprobe fails) should still show the error.
 
+**Done (2026-10-02), as described**, with these choices:
+- The main process logs the map as `[media] decoder support: ...`, so no temporary `console.log` is needed.
+- `av1_10bit` and `vp9_10bit` aren't probed, because the baseline already treats all VP9/AV1 as supported.
+- The fallback goes one step per error in both directions: a file that starts in copy mode falls back to re-encoding too.
+- When direct playback falls back, the audio track picked in the player carries over to the converted stream.
+- Copied HEVC is tagged `hvc1` in the MP4 stream.
+
+Found while testing: **copy-mode seeks started one keyframe interval early (up to ~10s) for any video with B-frames**, which includes almost all real H.264/HEVC files, on every platform. For `-ss` input seeking, ffmpeg moves the target 3/23s earlier when the stream has B-frames. Kino asked for exactly the keyframe time + 0.01s, so the adjusted target fell before that keyframe. **Fix** (`streaming.ts` `buildArgs()`): add 3/23s to the nudge when `has_b_frames` > 0. The earlier H.264 tests missed this because `-preset ultrafast` encodes without B-frames.
+
 **Test (Linux first, then Windows/macOS):**
 
-- [ ] Linux: map comes back with HEVC unsupported → behaviour identical to today.
-- [ ] Linux, simulated: temporarily force `hevc: true` in the map → `hevc8_eac3.mkv` tries direct, fails, falls back to conversion within ~2s at the same position, no error screen. Remove the override.
-- [ ] Windows: log the support map (add a temporary `console.log`). Record whether `hevc`/`hevc10` are true on this machine.
-- [ ] Windows with HEVC support: `hevc8_eac3.mkv` plays with **copy mode** (video copied, only E-AC3 converted) — the "Converted" badge shows, and Task Manager shows low ffmpeg CPU. `hevc10.mkv` plays directly if `hevc10` is true.
-- [ ] Windows without HEVC support (or a VM): HEVC files go through HLS exactly as on Linux.
+- [ ] Linux: map comes back with HEVC unsupported → behaviour identical to today. *Not run yet; no Linux machine was available.*
+- [x] Simulated failure (Windows): made the `<video>` element report `MEDIA_ERR_DECODE`. Direct at 0:52 → copy mode from the keyframe at 0:51.8, still playing → second error → HLS, still playing. Two error events for one failure moved only one step. A failure behind the resume prompt reloads paused at the saved position. A missing file still shows the error.
+- [x] Windows: `hevc`, `hevc10` and `h264_10bit` are true on the test machine; `ac3`, `eac3` and `dts` are false.
+- [x] Windows with HEVC support: `hevc8_eac3.mkv` plays with **copy mode**; after a seek to 3:30 the picture and bar agree (3:30.4 vs 3:30). `hevc10.mkv` (AAC), HEVC in MP4 and 10-bit H.264 play directly with no ffmpeg running. On the real library: 28 files play directly and 17 copy the video, where before almost every file re-encoded.
+- [ ] Windows without HEVC support (or a VM): HEVC files go through HLS exactly as on Linux. *Not run yet.*
+
+Limitation: when audio is wrongly reported as supported, Chromium plays the video silently instead of raising an error, so the fallback can't catch it. Phase 3 checks audio codecs explicitly.
 
 ## Phase 3 — Audio track checks (list item 5)
 

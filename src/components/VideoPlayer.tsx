@@ -145,6 +145,10 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     // continue once it's ready (null = no stream load pending).
     const pendingPlayIntentRef = useRef<boolean | null>(null)
     const tracksLoadedForMovieRef = useRef<number | null>(null)
+    // Incremented when a movie starts loading or the player closes, so stale async work is dropped.
+    const playbackSessionRef = useRef(0)
+    // Set while falling back to conversion after a playback error, so one error moves one step.
+    const fallbackPendingRef = useRef(false)
 
     // State
     const [isPlaying, setIsPlaying] = useState(true)
@@ -349,6 +353,35 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         setCurrentTime(time)
     }, [destroyHls, hideBufferingIndicator, movie.file_path])
 
+    /** Load `info`'s playback mode at `startAt` seconds; `play` false leaves it paused (resume prompt). */
+    const beginPlayback = useCallback(async (info: PlaybackInfo, startAt: number, play: boolean, isCurrent: () => boolean) => {
+        const useHls = info.mode === 'transcode' && info.hls && Hls.isSupported()
+        isProgressiveRef.current = info.mode === 'transcode' && !useHls
+        streamRequestRef.current++
+        streamStartPendingRef.current = false
+        streamOffsetRef.current = 0
+        pendingStartTimeRef.current = 0
+        setPlaybackInfo(info)
+        if (info.duration > 0) setDuration(info.duration)
+        setAutoPlayEnabled(play)
+        lastUiTimeRef.current = startAt
+        setCurrentTime(startAt)
+
+        if (useHls) {
+            startHlsAt(startAt, play)
+        } else if (info.mode === 'transcode') {
+            const streamStart = startAt > 0 ? await resolveStreamStart(startAt) : 0
+            if (!isCurrent()) return
+            streamOffsetRef.current = streamStart
+            lastUiTimeRef.current = streamStart
+            setCurrentTime(streamStart)
+            setVideoSrc(buildStreamUrl(streamStart, audioStreamIndexRef.current))
+        } else {
+            pendingStartTimeRef.current = startAt
+            setVideoSrc(`media://${encodeURIComponent(movie.file_path)}`)
+        }
+    }, [buildStreamUrl, movie.file_path, resolveStreamStart, startHlsAt])
+
     /** Restart a converted video at `time`, e.g. with a different audio track. */
     const restartConversionAt = useCallback((time: number, play: boolean) => {
         if (hlsRef.current) startHlsAt(time, play)
@@ -486,6 +519,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     // Load source: decide between direct playback and on-the-fly conversion, and where to start.
     useEffect(() => {
         let cancelled = false
+        playbackSessionRef.current++
+        fallbackPendingRef.current = false
 
         const init = async () => {
             if (hlsRef.current || isProgressiveRef.current) {
@@ -520,50 +555,26 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             const startAt = progress > 5 && mode !== 'restart' ? progress : 0
             const showPrompt = startAt > 0 && mode === 'prompt'
 
-            const useHls = info.mode === 'transcode' && info.hls && Hls.isSupported()
-            isProgressiveRef.current = info.mode === 'transcode' && !useHls
-            streamRequestRef.current++
-            streamStartPendingRef.current = false
-            streamOffsetRef.current = 0
             audioStreamIndexRef.current = null
-            pendingStartTimeRef.current = 0
-            setPlaybackInfo(info)
-            if (info.duration > 0) setDuration(info.duration)
-
             if (showPrompt) {
                 // Show the frame where the user left off, paused, behind the prompt
                 setSavedProgress(progress)
                 setShowResumePrompt(true)
                 setIsPlaying(false)
             }
-            setAutoPlayEnabled(!showPrompt)
-            lastUiTimeRef.current = startAt
-            setCurrentTime(startAt)
-
-            if (useHls) {
-                startHlsAt(startAt, !showPrompt)
-            } else if (info.mode === 'transcode') {
-                const streamStart = startAt > 0 ? await resolveStreamStart(startAt) : 0
-                if (cancelled) return
-                streamOffsetRef.current = streamStart
-                lastUiTimeRef.current = streamStart
-                setCurrentTime(streamStart)
-                setVideoSrc(buildStreamUrl(streamStart, null))
-            } else {
-                pendingStartTimeRef.current = startAt
-                setVideoSrc(`media://${encodeURIComponent(movie.file_path)}`)
-            }
+            await beginPlayback(info, startAt, !showPrompt, () => !cancelled)
         }
 
         void init()
         return () => {
             cancelled = true
         }
-    }, [movie.id, movie.file_path, disableProgress, buildStreamUrl, resolveStreamStart, destroyHls, startHlsAt])
+    }, [movie.id, movie.file_path, disableProgress, beginPlayback, destroyHls])
 
     // Stop any running conversion when the player closes
     useEffect(() => {
         return () => {
+            playbackSessionRef.current++
             destroyHls()
             void window.ipcRenderer.invoke('media:stop-streams').catch(() => undefined)
         }
@@ -982,6 +993,53 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         setSettingsTab('main')
     }
 
+    // HLS errors are handled by hls.js (startHlsAt); this covers direct playback and progressive streams.
+    const handleVideoError = async () => {
+        const video = videoRef.current
+        const error = video?.error
+        if (!video || !error || !videoSrc) return
+        console.error('Video playback error:', error.code, error.message)
+
+        // Chromium reports a codec it can't decode (or a stream that failed) as one of these. Fall back
+        // one step: direct -> copy the video, convert the audio -> re-encode everything.
+        const cantDecode = error.code === MediaError.MEDIA_ERR_DECODE || error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+        const canFallBack = !!playbackInfo && (playbackInfo.mode === 'direct' || playbackInfo.copyVideo)
+        if (cantDecode && canFallBack) {
+            if (fallbackPendingRef.current) return
+            fallbackPendingRef.current = true
+            const session = playbackSessionRef.current
+            const isCurrent = () => session === playbackSessionRef.current
+            const position = Math.max(getAbsoluteTime(), pendingStartTimeRef.current)
+            const play = isPlaying && !showResumePrompt
+            if (playbackInfo.mode === 'direct') {
+                // Direct playback switches audio inside the element; a converted stream needs the stream index.
+                const selected = audioTracks.find(t => t.enabled)
+                audioStreamIndexRef.current = selected ? Number(selected.id) : null
+            }
+            setVideoSrc(undefined)
+            try {
+                const next: PlaybackInfo | null = await window.ipcRenderer.invoke('media:force-conversion', movie.file_path)
+                if (!isCurrent()) return
+                if (next) {
+                    await beginPlayback(next, position, play, isCurrent)
+                    return
+                }
+            } catch (err) {
+                console.error('Failed to fall back to conversion:', err)
+                if (!isCurrent()) return
+            } finally {
+                if (isCurrent()) fallbackPendingRef.current = false
+            }
+        }
+
+        hideBufferingIndicator()
+        setPlaybackError(
+            playbackInfo?.mode === 'transcode'
+                ? CONVERSION_ERROR
+                : 'This video format isn’t supported.'
+        )
+    }
+
     const handleResume = () => {
         // The source was already loaded at the saved position; just start playing.
         setAutoPlayEnabled(true)
@@ -1299,17 +1357,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                     className="w-full h-full object-contain"
                     autoPlay={autoPlayEnabled}
                     src={videoSrc}
-                    onError={() => {
-                        const error = videoRef.current?.error
-                        if (!error || !videoSrc) return
-                        console.error('Video playback error:', error.code, error.message)
-                        hideBufferingIndicator()
-                        setPlaybackError(
-                            playbackInfo?.mode === 'transcode'
-                                ? CONVERSION_ERROR
-                                : 'This video format isn’t supported.'
-                        )
-                    }}
+                    onError={() => void handleVideoError()}
                     onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={handleLoadedMetadata}
                     onPlay={() => {

@@ -52,14 +52,24 @@ interface StreamRequest {
 function buildArgs(profile: EncoderProfile, media: MediaDetails, { filePath, start, audioStreamIndex }: StreamRequest) {
     const video = media.info.copyVideo
         // Copied streams can only be cut at the source's keyframes, so fragment by duration instead.
-        ? { input: [], output: ['-c:v', 'copy', '-movflags', 'empty_moov+default_base_moof', '-frag_duration', '2000000'] }
+        ? {
+            input: [],
+            output: [
+                '-c:v', 'copy',
+                // ffmpeg tags copied HEVC as hev1 in MP4; hvc1 is the tag decoders are guaranteed to accept.
+                ...(media.videoCodec === 'hevc' ? ['-tag:v', 'hvc1'] : []),
+                '-movflags', 'empty_moov+default_base_moof', '-frag_duration', '2000000',
+            ],
+        }
         : (() => {
             const args = buildVideoArgs(profile, media)
             return { input: args.input, output: [...args.output, '-movflags', 'frag_keyframe+empty_moov+default_base_moof'] }
         })()
     // Copied video starts at the keyframe at or before -ss. `start` is normally that keyframe
     // already (see resolveStreamStart); nudge past it so rounding can't land on the previous one.
-    const seek = Math.max(0, start) + (media.info.copyVideo && start > 0 ? 0.01 : 0)
+    // ffmpeg also moves the seek 3/23s earlier for streams with B-frames, so nudge past that too.
+    const nudge = 0.01 + (media.videoHasBFrames ? 3 / 23 : 0)
+    const seek = Math.max(0, start) + (media.info.copyVideo && start > 0 ? nudge : 0)
     return [
         '-hide_banner', '-nostdin', '-v', 'error',
         ...video.input,
