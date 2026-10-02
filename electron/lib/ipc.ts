@@ -128,8 +128,13 @@ export function registerIPC() {
         return { queued: 1 }
     })
     ipcMain.handle('media:get-playback-info', async (_, filePath) => {
-        const { getPlaybackInfo } = await import('./streaming')
+        const { getPlaybackInfo } = await import('./media')
         return getPlaybackInfo(filePath)
+    })
+
+    ipcMain.handle('media:resolve-stream-start', async (_, filePath: string, start: number) => {
+        const { resolveStreamStart } = await import('./media')
+        return resolveStreamStart(filePath, start)
     })
 
     ipcMain.handle('media:stop-streams', async () => {

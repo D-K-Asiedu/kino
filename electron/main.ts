@@ -6,7 +6,7 @@ import { initDB } from './lib/database'
 import { registerIPC } from './lib/ipc'
 import { startWatcher } from './lib/watcher'
 import { generateDefaultPlaylists } from './lib/playlists'
-import { handleStreamRequest, stopAllStreams } from './lib/streaming'
+import { handleStreamRequest, stopAllStreams, warmUpEncoders } from './lib/streaming'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -69,7 +69,9 @@ protocol.registerSchemesAsPrivileged([
       secure: true,
       supportFetchAPI: true,
       bypassCSP: true,
-      stream: true
+      stream: true,
+      // hls.js loads the playlist and segments with XHR from the app's origin
+      corsEnabled: true
     }
   }
 ])
@@ -194,6 +196,7 @@ app.whenReady().then(async () => {
       }
     })
     protocol.handle('kino-stream', handleStreamRequest)
+    warmUpEncoders()
     writeLog('INFO', 'Media protocol handler registered')
 
     try {

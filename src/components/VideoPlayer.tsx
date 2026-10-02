@@ -4,6 +4,7 @@ import {
     History, RotateCcw, Settings, Check, Keyboard, PictureInPicture2, Type, X
 } from 'lucide-react'
 import { useEffect, useRef, useState, useCallback } from 'react'
+import Hls from 'hls.js/light'
 import { Movie, VideoElementWithTracks, AudioTrack } from '../types'
 
 interface VideoPlayerProps {
@@ -72,8 +73,12 @@ interface PlaybackInfo {
     mode: 'direct' | 'transcode'
     duration: number
     copyVideo: boolean
+    /** Converted as HLS (see electron/lib/hls.ts) rather than as one progressive stream. */
+    hls: boolean
     reason: string | null
 }
+
+const CONVERSION_ERROR = 'Kino couldn’t convert this video for playback.'
 
 interface ActiveSubtitle {
     vtt: string
@@ -122,11 +127,17 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const effectiveVolumeRef = useRef(1)
     // Only the first movie honours startMode; next/previous episodes use the normal prompt.
     const startModeRef = useRef(startMode)
-    // Converted streams (see electron/lib/streaming.ts) restart at the seek position, so the
-    // element's currentTime is relative to streamOffsetRef. Direct playback always has offset 0.
-    const isTranscodeRef = useRef(false)
+    // Progressive converted streams (see electron/lib/streaming.ts) restart at the seek position, so
+    // the element's currentTime is relative to streamOffsetRef. Direct and HLS playback use offset 0.
+    const isProgressiveRef = useRef(false)
+    // Set while a converted video plays through hls.js; it owns the element's source.
+    const hlsRef = useRef<Hls | null>(null)
     const streamOffsetRef = useRef(0)
     const audioStreamIndexRef = useRef<number | null>(null)
+    // Incremented per converted-stream start, so a slow start that was superseded is dropped.
+    const streamRequestRef = useRef(0)
+    // True while a new converted stream's start is being resolved; the old stream's time updates are stale.
+    const streamStartPendingRef = useRef(false)
     const activeSubtitleRef = useRef<ActiveSubtitle | null>(null)
     // Direct playback: position to seek to once metadata has loaded (resume point).
     const pendingStartTimeRef = useRef(0)
@@ -154,6 +165,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const [textTracks, setTextTracks] = useState<TextTrack[]>([])
     const [playbackInfo, setPlaybackInfo] = useState<PlaybackInfo | null>(null)
     const [videoSrc, setVideoSrc] = useState<string | undefined>(undefined)
+    // hls.js sets the element's source itself, so videoSrc stays empty during HLS playback.
+    const [isHlsAttached, setIsHlsAttached] = useState(false)
     const [autoPlayEnabled, setAutoPlayEnabled] = useState(true)
     const [playbackError, setPlaybackError] = useState<string | null>(null)
 
@@ -205,7 +218,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const getAbsoluteTime = useCallback(() => {
         const video = videoRef.current
         if (!video) return 0
-        return (isTranscodeRef.current ? streamOffsetRef.current : 0) + video.currentTime
+        return (isProgressiveRef.current ? streamOffsetRef.current : 0) + video.currentTime
     }, [])
 
     const buildStreamUrl = useCallback((start: number, audioStreamIndex: number | null) => {
@@ -227,7 +240,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         revokeSubtitleObjectUrl()
         if (!subtitle) return
 
-        const offset = isTranscodeRef.current ? streamOffsetRef.current : 0
+        const offset = isProgressiveRef.current ? streamOffsetRef.current : 0
         const url = URL.createObjectURL(new Blob([shiftVttCues(subtitle.vtt, offset)], { type: 'text/vtt' }))
         const trackEl = document.createElement('track')
         trackEl.kind = 'subtitles'
@@ -250,17 +263,97 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         return pendingPlayIntentRef.current ?? !(videoRef.current?.paused ?? true)
     }, [])
 
+    /** Where a converted stream asked to start at `time` really begins (copied video starts on a keyframe). */
+    const resolveStreamStart = useCallback(async (time: number) => {
+        try {
+            const start = Number(await window.ipcRenderer.invoke('media:resolve-stream-start', movie.file_path, time))
+            return Number.isFinite(start) ? start : time
+        } catch (err) {
+            console.error('Failed to resolve stream start:', err)
+            return time
+        }
+    }, [movie.file_path])
+
     /** Converted playback: start a new stream at `time` (seconds into the movie). */
-    const startStreamAt = useCallback((time: number, play: boolean) => {
+    const startStreamAt = useCallback(async (time: number, play: boolean) => {
+        const request = ++streamRequestRef.current
+        const requested = Math.max(0, time)
+        streamStartPendingRef.current = true
         pendingPlayIntentRef.current = play
-        streamOffsetRef.current = Math.max(0, time)
         setAutoPlayEnabled(play)
         setPlaybackError(null)
-        setVideoSrc(buildStreamUrl(streamOffsetRef.current, audioStreamIndexRef.current))
-        lastUiTimeRef.current = streamOffsetRef.current
-        setCurrentTime(streamOffsetRef.current)
+        lastUiTimeRef.current = requested
+        setCurrentTime(requested)
+
+        const start = await resolveStreamStart(requested)
+        // A later seek superseded this one while the start was being resolved.
+        if (request !== streamRequestRef.current) return
+
+        streamStartPendingRef.current = false
+        streamOffsetRef.current = start
+        setVideoSrc(buildStreamUrl(start, audioStreamIndexRef.current))
+        lastUiTimeRef.current = start
+        setCurrentTime(start)
         if (activeSubtitleRef.current) attachActiveSubtitle()
-    }, [attachActiveSubtitle, buildStreamUrl])
+    }, [attachActiveSubtitle, buildStreamUrl, resolveStreamStart])
+
+    const destroyHls = useCallback(() => {
+        hlsRef.current?.destroy()
+        hlsRef.current = null
+        setIsHlsAttached(false)
+    }, [])
+
+    /** HLS playback: (re)load the converted movie, starting at `time` (seconds). */
+    const startHlsAt = useCallback((time: number, play: boolean) => {
+        const video = videoRef.current
+        if (!video) return
+        destroyHls()
+        pendingPlayIntentRef.current = play
+        setAutoPlayEnabled(play)
+        setPlaybackError(null)
+
+        const hls = new Hls({
+            startPosition: time,
+            // Segments are produced on demand, so a segment after a seek can take a few seconds to arrive.
+            fragLoadPolicy: {
+                default: {
+                    maxTimeToFirstByteMs: 30000,
+                    maxLoadTimeMs: 120000,
+                    timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 0 },
+                    errorRetry: { maxNumRetry: 3, retryDelayMs: 500, maxRetryDelayMs: 2000 },
+                },
+            },
+        })
+        let recoveredMediaError = false
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+            if (!data.fatal) return
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recoveredMediaError) {
+                recoveredMediaError = true
+                hls.recoverMediaError()
+                return
+            }
+            console.error('HLS playback error:', data.type, data.details)
+            hideBufferingIndicator()
+            setPlaybackError(CONVERSION_ERROR)
+        })
+        const params = new URLSearchParams({
+            path: movie.file_path,
+            start: time.toFixed(3),
+            audio: audioStreamIndexRef.current === null ? '' : String(audioStreamIndexRef.current),
+        })
+        hls.loadSource(`kino-stream://hls/index.m3u8?${params.toString()}`)
+        hls.attachMedia(video)
+        hlsRef.current = hls
+        setIsHlsAttached(true)
+        lastUiTimeRef.current = time
+        setCurrentTime(time)
+    }, [destroyHls, hideBufferingIndicator, movie.file_path])
+
+    /** Restart a converted video at `time`, e.g. with a different audio track. */
+    const restartConversionAt = useCallback((time: number, play: boolean) => {
+        if (hlsRef.current) startHlsAt(time, play)
+        else void startStreamAt(time, play)
+    }, [startHlsAt, startStreamAt])
 
     const performSeek = useCallback((time: number) => {
         const video = videoRef.current
@@ -273,7 +366,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         suppressBufferingUntilRef.current = Date.now() + 400
         hideBufferingIndicator()
 
-        if (isTranscodeRef.current) {
+        if (isProgressiveRef.current) {
             // A converted stream can only seek within what has already arrived; anything else
             // restarts the conversion at the target position.
             const relative = clampedTime - streamOffsetRef.current
@@ -292,7 +385,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 setCurrentTime(clampedTime)
             } else {
                 pendingSeekTimeRef.current = clampedTime
-                startStreamAt(clampedTime, isPlaybackIntended())
+                void startStreamAt(clampedTime, isPlaybackIntended())
             }
             return
         }
@@ -393,11 +486,16 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         let cancelled = false
 
         const init = async () => {
+            if (hlsRef.current || isProgressiveRef.current) {
+                // Switching away from a converted video (next/previous episode); stop its encoder.
+                void window.ipcRenderer.invoke('media:stop-streams').catch(() => undefined)
+            }
+            destroyHls()
             setPlaybackError(null)
             setPlaybackInfo(null)
             setVideoSrc(undefined)
 
-            let info: PlaybackInfo = { mode: 'direct', duration: 0, copyVideo: true, reason: null }
+            let info: PlaybackInfo = { mode: 'direct', duration: 0, copyVideo: true, hls: false, reason: null }
             try {
                 info = await window.ipcRenderer.invoke('media:get-playback-info', movie.file_path)
             } catch (err) {
@@ -420,7 +518,10 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             const startAt = progress > 5 && mode !== 'restart' ? progress : 0
             const showPrompt = startAt > 0 && mode === 'prompt'
 
-            isTranscodeRef.current = info.mode === 'transcode'
+            const useHls = info.mode === 'transcode' && info.hls && Hls.isSupported()
+            isProgressiveRef.current = info.mode === 'transcode' && !useHls
+            streamRequestRef.current++
+            streamStartPendingRef.current = false
             streamOffsetRef.current = 0
             audioStreamIndexRef.current = null
             pendingStartTimeRef.current = 0
@@ -437,9 +538,15 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             lastUiTimeRef.current = startAt
             setCurrentTime(startAt)
 
-            if (info.mode === 'transcode') {
-                streamOffsetRef.current = startAt
-                setVideoSrc(buildStreamUrl(startAt, null))
+            if (useHls) {
+                startHlsAt(startAt, !showPrompt)
+            } else if (info.mode === 'transcode') {
+                const streamStart = startAt > 0 ? await resolveStreamStart(startAt) : 0
+                if (cancelled) return
+                streamOffsetRef.current = streamStart
+                lastUiTimeRef.current = streamStart
+                setCurrentTime(streamStart)
+                setVideoSrc(buildStreamUrl(streamStart, null))
             } else {
                 pendingStartTimeRef.current = startAt
                 setVideoSrc(`media://${encodeURIComponent(movie.file_path)}`)
@@ -450,14 +557,15 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         return () => {
             cancelled = true
         }
-    }, [movie.id, movie.file_path, disableProgress, buildStreamUrl])
+    }, [movie.id, movie.file_path, disableProgress, buildStreamUrl, resolveStreamStart, destroyHls, startHlsAt])
 
     // Stop any running conversion when the player closes
     useEffect(() => {
         return () => {
+            destroyHls()
             void window.ipcRenderer.invoke('media:stop-streams').catch(() => undefined)
         }
-    }, [])
+    }, [destroyHls])
 
     useEffect(() => {
         lastUiTimeRef.current = 0
@@ -537,7 +645,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const handleTimeUpdate = useCallback(() => {
         const video = videoRef.current
         if (!video) return
-        if (isScrubbingRef.current) return
+        if (isScrubbingRef.current || streamStartPendingRef.current) return
 
         const time = getAbsoluteTime()
         const prev = lastUiTimeRef.current
@@ -687,7 +795,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
     const handleLoadedMetadata = async () => {
         const video = videoRef.current
-        if (isTranscodeRef.current) {
+        if (isProgressiveRef.current) {
             // The element only knows the length of the stream so far; use the file's real duration.
             if (playbackInfo?.duration) setDuration(playbackInfo.duration)
         } else {
@@ -754,7 +862,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     }
 
     const toggleAudioTrack = (index: number, trackSource?: AudioTrack[]) => {
-        if (isTranscodeRef.current) {
+        if (isProgressiveRef.current || hlsRef.current) {
             // Converted streams carry a single audio track; switching restarts the stream with the new one.
             const trackList = trackSource ?? audioTracks
             const track = trackList[index]
@@ -768,7 +876,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             }
             if (streamIndex !== activeIndex) {
                 audioStreamIndexRef.current = streamIndex
-                startStreamAt(getAbsoluteTime(), isPlaybackIntended())
+                restartConversionAt(getAbsoluteTime(), isPlaybackIntended())
             }
             setSettingsTab('main')
             return
@@ -876,8 +984,10 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         // The source was already loaded at the saved position; just start playing.
         setAutoPlayEnabled(true)
         if (videoRef.current && savedProgress) {
-            lastUiTimeRef.current = savedProgress
-            setCurrentTime(savedProgress)
+            // Converted streams may have started at the keyframe before the saved position.
+            const resumeAt = isProgressiveRef.current ? streamOffsetRef.current : savedProgress
+            lastUiTimeRef.current = resumeAt
+            setCurrentTime(resumeAt)
             setIsPlaying(true)
             void videoRef.current.play().catch(() => undefined)
         }
@@ -886,8 +996,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
     const handleRestart = () => {
         setAutoPlayEnabled(true)
-        if (isTranscodeRef.current) {
-            startStreamAt(0, true)
+        if (isProgressiveRef.current) {
+            void startStreamAt(0, true)
         } else if (videoRef.current) {
             pendingStartTimeRef.current = 0
             videoRef.current.currentTime = 0
@@ -1194,7 +1304,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                         hideBufferingIndicator()
                         setPlaybackError(
                             playbackInfo?.mode === 'transcode'
-                                ? 'Kino couldn’t convert this video for playback.'
+                                ? CONVERSION_ERROR
                                 : 'This video format isn’t supported.'
                         )
                     }}
@@ -1336,7 +1446,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             )}
 
             {/* Probing the file / waiting for the first frame of a converted stream */}
-            {!videoSrc && !playbackError && (
+            {!videoSrc && !isHlsAttached && !playbackError && (
                 <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
                     <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-primary"></div>
                 </div>
