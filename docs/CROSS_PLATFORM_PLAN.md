@@ -2,7 +2,7 @@
 
 Kino ships for Linux, Windows and macOS. The current conversion pipeline was built and tested only on Linux (Intel Iris Xe, a library of HEVC files ≤1080p). This plan covers the changes needed for it to work well on every platform, and how to test them on Windows.
 
-Status: nothing in this plan is implemented yet. Work through the phases in order; each one ends with a test checklist.
+Status: Phase 0 is done on Windows (2026-10-02). The baseline passes after three fixes, listed under [Phase 0 findings](#phase-0-findings). Phases 1–7 are not implemented yet. Work through them in order; each one ends with a test checklist.
 
 ## How playback works today
 
@@ -14,12 +14,12 @@ Read this first; file references are to the current code.
   - `transcode` with `copyVideo: false` (`hls: true`) — video is re-encoded and served as on-demand HLS from [`electron/lib/hls.ts`](../electron/lib/hls.ts) (`kino-stream://hls/...`), played with hls.js.
 - **Supported codecs are hard-coded** in `media.ts`: video `h264` (8-bit only), `vp8`, `vp9`, `av1`; audio `aac`, `mp3`, `opus`, `vorbis`, `flac`; direct containers `.mp4 .m4v .mov .webm .mkv`.
 - **Encoders** — [`electron/lib/encoders.ts`](../electron/lib/encoders.ts) test-runs the bundled ffmpeg and any system ffmpeg at startup and ranks what works: `h264_vaapi` > `vp9_vaapi` > `libx264`. A stream that produces no output falls back to the next profile. The chosen list is logged as `[stream] encoders: ...`.
-- **HLS sessions** cache 3-second segments in `os.tmpdir()/kino-hls/<pid>/`. The encoder is paused with `SIGSTOP` when it gets 20 segments (~60s) ahead of the player, and resumed with `SIGCONT`.
+- **HLS sessions** cache 3-second segments in `os.tmpdir()/kino-hls/<pid>/`. The encoder is paused with `SIGSTOP` when it gets 20 segments (~60s) ahead of the player, and resumed with `SIGCONT`. ffmpeg runs with the session folder as its working directory and writes relative file names (see Phase 0 findings). Segments are deleted when the player closes and when the app quits: `before-quit` waits up to 3s for `shutdownStreams()`. Folders left behind by a crash are removed the next time an HLS session starts.
 - **Player** — [`src/components/VideoPlayer.tsx`](../src/components/VideoPlayer.tsx): `init` effect picks the mode, `startHlsAt` / `startStreamAt` start conversions, `toggleAudioTrack` switches tracks, the `<video onError>` handler shows errors.
 
 ## Phase 0 — Move to Windows and check what exists
 
-The Linux work is uncommitted at the time of writing; commit and push it first.
+Done on Windows 11 with the bundled ffmpeg (6.1.1, gyan.dev essentials build; only `libx264` passes encoder detection). Results are in the checklist and findings below.
 
 On the Windows machine:
 
@@ -58,14 +58,38 @@ $ff = "<repo>\node_modules\ffmpeg-static\ffmpeg.exe"
 
 Also test with a few real files (an HEVC film, a DVD/TV rip, a file with several audio tracks) if you have them.
 
-**Baseline checklist (existing features, never run on Windows):**
+To check that the progress bar matches the picture, burn the timestamp into the test video. Add this filter to any command above (the font path is for Windows):
 
-- [ ] App starts; the main-process console shows `[stream] encoders: ...` with at least `libx264 (bundled ...)`.
-- [ ] `h264_ac3.mkv` plays (copy mode); seeking works; progress bar matches the picture.
-- [ ] `xvid.avi` plays through HLS; seek far ahead (~1s), seek back (near-instant).
-- [ ] While an HLS video plays, `%TEMP%\kino-hls\<pid>\` fills with `seg_*.m4s`; it is deleted when the player closes.
-- [ ] No `ffmpeg.exe` is left in Task Manager after closing the player or quitting.
-- [ ] Watch the console for ffmpeg errors containing `rename` (see "Windows risks" below).
+```powershell
+-vf "drawtext=fontfile='C\:/Windows/Fonts/arial.ttf':text='%{pts\:hms}':fontsize=96:fontcolor=white:box=1:boxcolor=black:x=40:y=40"
+```
+
+**Baseline checklist (existing features), Windows results from 2026-10-02:**
+
+- [x] App starts; the main-process console shows `[stream] encoders: ...` with at least `libx264 (bundled ...)`. Shows `libx264 (bundled, tonemap: none)`. No system ffmpeg is on PATH.
+- [x] `h264_ac3.mkv` plays (copy mode); seeking works; progress bar matches the picture. Starts in ~1.4s. After a seek, the burned-in time and the bar agree (3:32.6 vs 3:32). A seek starts at the keyframe at or before the target, so with `-g 240` (a keyframe every 10s) a seek to 0:30 starts at 0:20. That is expected for copied video.
+- [x] `xvid.avi` plays through HLS; seek far ahead (~1s), seek back (near-instant). Starts in ~1.8s; seek ahead 0.7s; seek back 0.7s. Also tested `hevc8_eac3.mkv`: a seek ahead that restarts the encoder takes ~1.9s at 1080p with libx264.
+- [x] While an HLS video plays, `%TEMP%\kino-hls\<pid>\` fills with `seg_*.m4s`; it is deleted when the player closes. Needed finding 1 below. Before that fix, nothing played.
+- [x] No `ffmpeg.exe` is left in Task Manager after closing the player or quitting. The temp folder is also removed on quit; that needed finding 3 below.
+- [x] Watch the console for ffmpeg errors containing `rename` (see "Windows risks" below). None seen.
+
+### Phase 0 findings
+
+Three bugs blocked or affected Windows playback. All are fixed on `main`.
+
+1. **HLS init segment written to the wrong folder (Windows only).** ffmpeg's HLS muxer finds the folder for `-hls_fmp4_init_filename` by splitting the playlist path on `/` only. With a Windows path (`C:\...\run_1.m3u8`) it finds no folder and writes `init_N.mp4` to the process's working directory: the repo root in dev, wherever Kino was started from in a build. The session waited for a file that never appeared, so every re-encoded (HLS) video failed. Linux paths contain `/`, so Linux was never affected. **Fix** (`hls.ts` `startRun()`): spawn ffmpeg with `cwd: this.dir` and pass relative names for the segments and playlist. Keep this in mind for any new ffmpeg output path: ffmpeg treats `\` and `/` differently in some muxers.
+2. **Player crashed on a saved volume above 1 (any platform).** An older build's ↑ key didn't clamp, and saved `kino_volume = 1.7999999999999994` to localStorage. Setting `video.volume` to that throws, which crashed `VideoPlayer` and left a blank screen. localStorage is per machine and per origin (dev `http://localhost:5173` vs built `file://`), so this only appeared where such a value had been saved. **Fix** (`VideoPlayer.tsx`): clamp the saved value to 0–1 when loading it.
+3. **HLS temp folder left behind on quit (any platform).** `before-quit` stopped ffmpeg, but Electron exited before the asynchronous folder delete finished. **Fix** (`main.ts`, `streaming.ts` `shutdownStreams()`, `hls.ts` `removeHlsFiles()`): `before-quit` delays the quit until cleanup finishes, with a 3s cap, and removes the whole `kino-hls/<pid>` folder. It retries briefly while Windows still reports files as in use. Cleanup measured at ~150ms.
+
+How to test without touching your own library: run a built app with an isolated profile and remote debugging, then drive it with the Chrome DevTools Protocol (renderer console, network requests, screenshots, mouse/keyboard input):
+
+```powershell
+npx vite build
+$env:ELECTRON_ENABLE_LOGGING = 1   # main- and renderer-process console on stdout
+node_modules\electron\dist\electron.exe . --user-data-dir="$env:TEMP\kino-test-profile" --remote-debugging-port=9222
+```
+
+In the renderer, `window.ipcRenderer.invoke('db:add-watch-path', '<test media folder>')` followed by `invoke('watcher:update')` adds the test files to the isolated library.
 
 ## Phase 1 — Windows encoder throttling (list item 4)
 
@@ -213,9 +237,9 @@ These ship together: detection decides more files can play directly, and fallbac
 
 ## Windows risks to watch while testing
 
-These are guesses from reading the code, not observed failures:
+These were guesses from reading the code. The outcome of each, from the Phase 0 run (2026-10-02), is in bold. The bug that actually broke playback, the init-segment path ([Phase 0 findings](#phase-0-findings) item 1), wasn't on this list.
 
-- **Renaming segments over existing files.** HLS uses `-hls_flags temp_file`: ffmpeg writes `seg_N.m4s.tmp` and renames it. On Windows a rename fails if the target exists. That only happens when a run reaches segments that are already cached; `collect()` stops such runs within ~100ms, but ffmpeg may have tried the rename first. Expected effect: an error line in the console and the run exiting early, which is harmless. If it causes stalls, stop runs one segment earlier.
-- **Deleting a session folder while ffmpeg still holds a file.** `HlsSession.destroy()` waits for the process to exit before removing the folder; check `%TEMP%\kino-hls` is actually emptied.
-- **Antivirus scanning** new segment files can slow the first segment after a seek; worth noting if seeks are slow on Windows only.
-- **System ffmpeg on PATH.** If one is installed (e.g. via winget/choco), it is tested alongside the bundled one and may be preferred if it has better encoders. Check the `[stream] encoders:` line says which binary is used.
+- **Renaming segments over existing files.** HLS uses `-hls_flags temp_file`: ffmpeg writes `seg_N.m4s.tmp` and renames it. On Windows a rename fails if the target exists. That only happens when a run reaches segments that are already cached; `collect()` stops such runs within ~100ms, but ffmpeg may have tried the rename first. Expected effect: an error line in the console and the run exiting early, which is harmless. If it causes stalls, stop runs one segment earlier. **Not seen:** no `rename` errors, including runs that seeked back into cached segments. Watch for it again once Phase 1 makes restarts frequent.
+- **Deleting a session folder while ffmpeg still holds a file.** `HlsSession.destroy()` waits for the process to exit before removing the folder; check `%TEMP%\kino-hls` is actually emptied. **Fine when the player closes** (ffmpeg exits in ~190ms, then the folder is removed). **On quit, the folder was left behind** because the app exited first (Phase 0 findings, item 3); that is now fixed.
+- **Antivirus scanning** new segment files can slow the first segment after a seek; worth noting if seeks are slow on Windows only. **Not seen:** the first segment arrives in under 1s with the test machine's default antivirus setup.
+- **System ffmpeg on PATH.** If one is installed (e.g. via winget/choco), it is tested alongside the bundled one and may be preferred if it has better encoders. Check the `[stream] encoders:` line says which binary is used. **Not present** on the test machine, so only the bundled build was used. Untested with a system ffmpeg.
