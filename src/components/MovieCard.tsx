@@ -10,7 +10,7 @@ import { formatTimeLeft } from '../lib/format'
 interface MovieCardProps {
     movie: Movie
     onClick?: () => void
-    /** Watched fraction, 0–1. Shows a progress bar on the poster. */
+    /** Watched fraction, 0–1. Shows a progress bar on the poster. Defaults to the movie's saved progress. */
     progress?: number
     /** When set, replaces the year/rating line with "42 min left". */
     remainingSeconds?: number
@@ -64,7 +64,8 @@ export function MovieCard({ movie, onClick, progress, remainingSeconds, onRemove
         }
     }
 
-    const showProgress = progress !== undefined && progress > 0
+    const watchedFraction = progress ?? (movie.progress && movie.duration ? movie.progress / movie.duration : 0)
+    const showProgress = watchedFraction > 0
 
     return (
         <>
@@ -97,7 +98,7 @@ export function MovieCard({ movie, onClick, progress, remainingSeconds, onRemove
                             <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/20">
                                 <div
                                     className="h-full bg-primary"
-                                    style={{ width: `${Math.min(100, Math.max(0, progress * 100))}%` }}
+                                    style={{ width: `${Math.min(100, Math.max(0, watchedFraction * 100))}%` }}
                                 />
                             </div>
                         )}

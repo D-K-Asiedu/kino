@@ -2,9 +2,15 @@ import { ipcRenderer, contextBridge } from 'electron'
 
 // --------- Expose some API to the Renderer process ---------
 contextBridge.exposeInMainWorld('ipcRenderer', {
+  // Returns an unsubscribe function: functions lose their identity crossing the context bridge,
+  // so off() can't find a listener registered here.
   on(...args: Parameters<typeof ipcRenderer.on>) {
     const [channel, listener] = args
-    return ipcRenderer.on(channel, (event, ...args) => listener(event, ...args))
+    const wrapped = (event: Electron.IpcRendererEvent, ...args: any[]) => listener(event, ...args)
+    ipcRenderer.on(channel, wrapped)
+    return () => {
+      ipcRenderer.off(channel, wrapped)
+    }
   },
   off(...args: Parameters<typeof ipcRenderer.off>) {
     const [channel, ...omit] = args

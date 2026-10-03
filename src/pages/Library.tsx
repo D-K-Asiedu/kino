@@ -9,6 +9,7 @@ import { DEFAULT_FILTERS, DEFAULT_SORT, MovieFilters, countActiveFilters } from 
 import { Movie } from '../types'
 import { FolderPlus, Search, X } from 'lucide-react'
 import { useCoalescedIpcRefresh } from '../hooks/useCoalescedIpcRefresh'
+import { usePlaybackProgressUpdates } from '../hooks/usePlaybackProgressUpdates'
 
 const PAGE_SIZE = 120
 
@@ -104,6 +105,8 @@ export function Library() {
     useEffect(() => {
         void refreshMovies()
     }, [refreshMovies, debouncedSearchQuery, filters, sortBy])
+
+    usePlaybackProgressUpdates(setMovies)
 
     useEffect(() => {
         const scrollRoot = document.getElementById('app-scroll-root')

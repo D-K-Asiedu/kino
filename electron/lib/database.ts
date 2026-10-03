@@ -261,8 +261,9 @@ export function getLibraryPage(query?: LibraryPageQuery) {
   const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : ''
   const countSql = `SELECT COUNT(*) as count FROM movies ${whereSql}`
   const itemsSql = `
-    SELECT *
-    FROM movies
+    SELECT m.*, p.progress, p.duration
+    FROM movies m
+    LEFT JOIN playback_progress p ON p.movie_id = m.id
     ${whereSql}
     ORDER BY ${orderBySql}
     LIMIT ? OFFSET ?
@@ -510,9 +511,10 @@ export function removeMovieFromPlaylist(playlistId: number, movieId: number) {
 
 export function getPlaylistMovies(playlistId: number) {
   return cachedStmt(`
-    SELECT m.*, pm.added_at as playlist_added_at
+    SELECT m.*, pm.added_at as playlist_added_at, p.progress, p.duration
     FROM movies m
     JOIN playlist_movies pm ON m.id = pm.movie_id
+    LEFT JOIN playback_progress p ON p.movie_id = m.id
     WHERE pm.playlist_id = ?
     ORDER BY pm.added_at DESC
   `).all(playlistId)
@@ -565,12 +567,19 @@ export function getPlaybackProgress(movieId: number) {
   return row ? row.progress : 0
 }
 
+// Movies with their saved playback position (null when never watched), for progress bars on cards.
+const MOVIE_WITH_PROGRESS_SQL = `
+  SELECT m.*, p.progress, p.duration
+  FROM movies m
+  LEFT JOIN playback_progress p ON p.movie_id = m.id
+`
+
 function getRotatingSlice(table: 'movies' | 'playlists', limit: number) {
   const countSql = table === 'movies'
     ? 'SELECT COUNT(*) as count FROM movies'
     : 'SELECT COUNT(*) as count FROM playlists'
   const listSql = table === 'movies'
-    ? 'SELECT * FROM movies ORDER BY id ASC LIMIT ? OFFSET ?'
+    ? `${MOVIE_WITH_PROGRESS_SQL} ORDER BY m.id ASC LIMIT ? OFFSET ?`
     : 'SELECT * FROM playlists ORDER BY id ASC LIMIT ? OFFSET ?'
 
   const total = (cachedStmt(countSql).get() as { count: number } | undefined)?.count ?? 0
@@ -584,7 +593,7 @@ function getRotatingSlice(table: 'movies' | 'playlists', limit: number) {
 
   const remaining = limit - primary.length
   const wrap = cachedStmt(table === 'movies'
-    ? 'SELECT * FROM movies ORDER BY id ASC LIMIT ?'
+    ? `${MOVIE_WITH_PROGRESS_SQL} ORDER BY m.id ASC LIMIT ?`
     : 'SELECT * FROM playlists ORDER BY id ASC LIMIT ?').all(remaining) as any[]
   return primary.concat(wrap)
 }
@@ -671,8 +680,8 @@ export function getHomeData() {
   `).all()
 
   const recentlyAdded = cachedStmt(`
-    SELECT * FROM movies 
-    ORDER BY added_at DESC 
+    ${MOVIE_WITH_PROGRESS_SQL}
+    ORDER BY m.added_at DESC
     LIMIT 10
   `).all()
 

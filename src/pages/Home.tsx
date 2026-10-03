@@ -62,7 +62,7 @@ export function Home() {
 
     const { runNow: refreshHomeData } = useCoalescedIpcRefresh(
         fetchHomeData,
-        ['library-updated', 'playlists-updated'],
+        ['library-updated', 'playlists-updated', 'playback-progress-updated'],
         { delayMs: 180 }
     )
 

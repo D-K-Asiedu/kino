@@ -9,6 +9,9 @@ export interface Movie {
     rating: number | null
     file_path: string
     added_at: string
+    /** Saved playback position and length in seconds; null/absent when never watched. */
+    progress?: number | null
+    duration?: number | null
 }
 
 export interface Playlist {

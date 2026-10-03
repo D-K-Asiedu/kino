@@ -70,13 +70,11 @@ export function useCoalescedIpcRefresh(
             scheduleRefresh()
         }
 
-        for (const channel of eventChannels) {
-            window.ipcRenderer.on(channel, handleEvent)
-        }
+        const unsubscribes = eventChannels.map(channel => window.ipcRenderer.on(channel, handleEvent))
 
         return () => {
-            for (const channel of eventChannels) {
-                window.ipcRenderer.off(channel, handleEvent)
+            for (const unsubscribe of unsubscribes) {
+                unsubscribe()
             }
         }
     }, [channelsKey, scheduleRefresh])

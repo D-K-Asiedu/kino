@@ -75,7 +75,11 @@ export function registerIPC() {
 
     // Video progress handlers
     ipcMain.handle('db:get-playback-progress', (_, movieId) => db.getPlaybackProgress(movieId))
-    ipcMain.handle('db:update-playback-progress', (_, movieId, progress, duration) => db.updatePlaybackProgress(movieId, progress, duration))
+    ipcMain.handle('db:update-playback-progress', (_, movieId, progress, duration) => {
+        const result = db.updatePlaybackProgress(movieId, progress, duration)
+        notifyRenderer('playback-progress-updated', { movieId, progress, duration })
+        return result
+    })
 
     ipcMain.handle('db:generate-default-playlists', async () => {
         const { generateDefaultPlaylists } = await import('./playlists')

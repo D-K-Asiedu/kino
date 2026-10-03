@@ -17,9 +17,11 @@ interface MovieFilterControlsProps {
     onFiltersChange: (filters: MovieFilters) => void
     sortBy: string
     onSortChange: (sortBy: string) => void
+    /** The page's default sort; any other sort is highlighted as active. */
+    defaultSort?: string
 }
 
-export function MovieFilterControls({ filters, onFiltersChange, sortBy, onSortChange }: MovieFilterControlsProps) {
+export function MovieFilterControls({ filters, onFiltersChange, sortBy, onSortChange, defaultSort = DEFAULT_SORT }: MovieFilterControlsProps) {
     const activeCount = countActiveFilters(filters)
 
     return (
@@ -49,7 +51,7 @@ export function MovieFilterControls({ filters, onFiltersChange, sortBy, onSortCh
                 icon={ArrowUpDown}
                 label={SORT_OPTIONS.find(o => o.value === sortBy)?.label ?? 'Sort'}
                 ariaLabel="Sort movies"
-                active={sortBy !== DEFAULT_SORT}
+                active={sortBy !== defaultSort}
                 sections={[{ options: SORT_OPTIONS, value: sortBy, onChange: onSortChange }]}
             />
         </>

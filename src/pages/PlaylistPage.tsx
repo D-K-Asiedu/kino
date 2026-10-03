@@ -7,9 +7,10 @@ import { VirtualMovieGrid } from '../components/VirtualMovieGrid'
 import { MovieGridSkeleton } from '../components/Skeleton'
 import { ActiveFilterChips, MovieFilterControls } from '../components/MovieFilterControls'
 import { useFeedback } from '../components/Feedback'
-import { DEFAULT_FILTERS, DEFAULT_SORT, MovieFilters, countActiveFilters, matchesFilters, sortMovies } from '../lib/movieFilters'
+import { DEFAULT_FILTERS, DEFAULT_PLAYLIST_SORT, MovieFilters, countActiveFilters, matchesFilters, sortMovies } from '../lib/movieFilters'
 import { ChevronLeft, Film, Trash2 } from 'lucide-react'
 import { useCoalescedIpcRefresh } from '../hooks/useCoalescedIpcRefresh'
+import { usePlaybackProgressUpdates } from '../hooks/usePlaybackProgressUpdates'
 
 export function PlaylistPage() {
     const { id } = useParams<{ id: string }>()
@@ -19,7 +20,7 @@ export function PlaylistPage() {
     const [movies, setMovies] = useState<Movie[]>([])
     const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null)
     const [filters, setFilters] = useState<MovieFilters>(DEFAULT_FILTERS)
-    const [sortBy, setSortBy] = useState(DEFAULT_SORT)
+    const [sortBy, setSortBy] = useState(DEFAULT_PLAYLIST_SORT)
     const [loading, setLoading] = useState(true)
 
     const fetchPlaylistData = useCallback(async () => {
@@ -56,6 +57,8 @@ export function PlaylistPage() {
     useEffect(() => {
         void refreshPlaylistData()
     }, [id, refreshPlaylistData])
+
+    usePlaybackProgressUpdates(setMovies)
 
     const handleRemoveFromPlaylist = async (movie: Movie) => {
         if (!playlist) return
@@ -170,6 +173,7 @@ export function PlaylistPage() {
                         onFiltersChange={setFilters}
                         sortBy={sortBy}
                         onSortChange={setSortBy}
+                        defaultSort={DEFAULT_PLAYLIST_SORT}
                     />
                     <button
                         onClick={() => void handleDeletePlaylist()}

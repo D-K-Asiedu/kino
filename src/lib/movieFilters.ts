@@ -10,6 +10,7 @@ export interface MovieFilters {
 
 export const DEFAULT_FILTERS: MovieFilters = { rating: 'all', decade: 'all' }
 export const DEFAULT_SORT = 'recent'
+export const DEFAULT_PLAYLIST_SORT = 'title-asc'
 
 export const RATING_OPTIONS: { value: RatingFilter; label: string }[] = [
     { value: 'all', label: 'Any rating' },
@@ -61,13 +62,17 @@ export function matchesFilters(movie: Movie, filters: MovieFilters) {
     return true
 }
 
+// Numeric so "Episode 2" sorts before "Episode 10".
+const titleCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+const compareTitles = (a: Movie, b: Movie) => titleCollator.compare(a.title, b.title)
+
 export function sortMovies(list: Movie[], sortBy: string) {
     const sorted = [...list]
     switch (sortBy) {
         case 'title-asc':
-            return sorted.sort((a, b) => a.title.localeCompare(b.title))
+            return sorted.sort((a, b) => compareTitles(a, b))
         case 'title-desc':
-            return sorted.sort((a, b) => b.title.localeCompare(a.title))
+            return sorted.sort((a, b) => compareTitles(b, a))
         case 'year-desc':
             return sorted.sort((a, b) => (b.year ?? -Infinity) - (a.year ?? -Infinity))
         case 'year-asc':
