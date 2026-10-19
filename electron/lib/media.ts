@@ -14,6 +14,8 @@ import { EncoderProfile, LIBPLACEBO_TONEMAP, ZSCALE_TONEMAP } from './encoders'
 const BASELINE_VIDEO_CODECS = new Set(['vp8', 'vp9', 'av1'])
 const PIX_FMTS_8BIT = new Set(['yuv420p', 'yuvj420p'])
 const PIX_FMTS_10BIT = new Set(['yuv420p10le'])
+// Any 10-bit (or deeper) layout, for deciding whether a conversion should keep 10 bits.
+const HIGH_BIT_DEPTH_PIX_FMT = /p1[0-6](le|be)$/
 const BASELINE_AUDIO_CODECS = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac'])
 const DIRECT_CONTAINERS = new Set(['.mp4', '.m4v', '.mov', '.webm', '.mkv'])
 const HDR_TRANSFERS = new Set(['smpte2084', 'arib-std-b67'])
@@ -47,6 +49,8 @@ export interface MediaDetails {
     /** Container start time in seconds; packet timestamps are offset by this. */
     startTime: number
     isHdr: boolean
+    /** Source video has more than 8 bits per channel. */
+    isHighBitDepth: boolean
     height: number
     videoCodec: string | null
     /** Reordered frames; ffmpeg adjusts -ss for these (see streaming.ts buildArgs). */
@@ -156,6 +160,7 @@ export async function getMediaDetails(filePath: string): Promise<MediaDetails> {
         info,
         startTime: Number(cached.data.format?.start_time) || 0,
         isHdr: HDR_TRANSFERS.has(String(video?.color_transfer ?? '')),
+        isHighBitDepth: HIGH_BIT_DEPTH_PIX_FMT.test(String(video?.pix_fmt ?? '')),
         height: Number(video?.height) || 0,
         videoCodec: video?.codec_name ?? null,
         videoHasBFrames: Number(video?.has_b_frames) > 0,
@@ -239,7 +244,10 @@ interface VideoArgOptions {
 export function buildVideoArgs(profile: EncoderProfile, media: MediaDetails, options: VideoArgOptions = {}): { input: string[], output: string[] } {
     const hardware = profile.encoder !== 'libx264'
     const scaleHeight = !hardware && media.height > SOFTWARE_MAX_HEIGHT ? SOFTWARE_MAX_HEIGHT : null
-    const pixFmt = hardware ? 'nv12' : 'yuv420p'
+    // 10-bit sources lose shades in conversion to 8-bit, which shows as banding in dark scenes, so they
+    // stay 10-bit where the encoder allows. HDR is tone-mapped down to 8-bit SDR either way.
+    const tenBit = profile.tenBit && media.isHighBitDepth && !media.isHdr
+    const pixFmt = hardware ? (tenBit ? 'p010' : 'nv12') : 'yuv420p'
 
     const filters: string[] = []
     if (media.isHdr && profile.toneMapper === 'libplacebo') {
@@ -259,10 +267,13 @@ export function buildVideoArgs(profile: EncoderProfile, media: MediaDetails, opt
         ? ['-init_hw_device', `vaapi=va:${profile.vaapiDevice}`, '-filter_hw_device', 'va', '-hwaccel', 'vaapi', '-hwaccel_device', 'va']
         : []
 
+    // VAAPI drivers may pick a rate-control mode that ignores the quality setting (Intel's iHD picks
+    // ICQ and ends up below the source's bitrate), so constant-QP is requested explicitly.
     const encoder = {
         libx264: ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21'],
-        h264_vaapi: ['-c:v', 'h264_vaapi', '-qp', '21'],
-        vp9_vaapi: ['-c:v', 'vp9_vaapi', '-global_quality', '80'],
+        h264_vaapi: ['-c:v', 'h264_vaapi', '-rc_mode', 'CQP', '-qp', '21'],
+        // VP9 quantizer index, 0-255 (lower is better).
+        vp9_vaapi: ['-c:v', 'vp9_vaapi', '-rc_mode', 'CQP', '-global_quality', '60'],
     }[profile.encoder]
 
     const keyframes = options.segmentSeconds

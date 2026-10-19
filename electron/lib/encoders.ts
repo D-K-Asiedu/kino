@@ -17,6 +17,8 @@ export interface EncoderProfile {
     vaapiDevice: string | null
     /** How this ffmpeg converts HDR to SDR; null when it can't. */
     toneMapper: ToneMapper | null
+    /** Whether the encoder can keep 10-bit sources at 10 bits (avoids banding in dark scenes). */
+    tenBit: boolean
 }
 
 export const bundledFfmpegPath = ffmpegStatic?.replace('app.asar', 'app.asar.unpacked') || null
@@ -24,6 +26,8 @@ export const bundledFfmpegPath = ffmpegStatic?.replace('app.asar', 'app.asar.unp
 // h264_vaapi needs the full Intel/AMD VA driver (e.g. RPM Fusion's intel-media-driver on Fedora);
 // distro "free" drivers often only expose VP9, which Chromium also plays inside MP4.
 const HARDWARE_ENCODERS: VideoEncoder[] = ['h264_vaapi', 'vp9_vaapi']
+// Chromium decodes 10-bit VP9 (profile 2) everywhere, but not 10-bit H.264, so only VP9 gets a 10-bit mode.
+const TEN_BIT_ENCODERS = new Set<VideoEncoder>(['vp9_vaapi'])
 
 export const LIBPLACEBO_TONEMAP = 'tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv'
 export const ZSCALE_TONEMAP = ['zscale=t=linear:npl=100', 'format=gbrpf32le', 'zscale=p=bt709',
@@ -79,13 +83,18 @@ async function detectToneMapper(ffmpegPath: string): Promise<ToneMapper | null> 
     return null
 }
 
-async function detectHardwareEncoder(ffmpegPath: string, encoder: VideoEncoder, devices: string[]): Promise<string | null> {
+function hardwareEncodeSucceeds(ffmpegPath: string, encoder: VideoEncoder, device: string, pixFmt: string) {
+    return ffmpegSucceeds(ffmpegPath, [
+        '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
+        ...TEST_INPUT, '-vf', `format=${pixFmt},hwupload`, '-c:v', encoder,
+    ])
+}
+
+async function detectHardwareEncoder(ffmpegPath: string, encoder: VideoEncoder, devices: string[]): Promise<{ device: string, tenBit: boolean } | null> {
     for (const device of devices) {
-        const ok = await ffmpegSucceeds(ffmpegPath, [
-            '-init_hw_device', `vaapi=va:${device}`, '-filter_hw_device', 'va',
-            ...TEST_INPUT, '-vf', 'format=nv12,hwupload', '-c:v', encoder,
-        ])
-        if (ok) return device
+        if (!await hardwareEncodeSucceeds(ffmpegPath, encoder, device, 'nv12')) continue
+        const tenBit = TEN_BIT_ENCODERS.has(encoder) && await hardwareEncodeSucceeds(ffmpegPath, encoder, device, 'p010')
+        return { device, tenBit }
     }
     return null
 }
@@ -99,10 +108,10 @@ async function detectBinary(ffmpegPath: string, devices: string[]): Promise<Enco
 
     const profiles: EncoderProfile[] = []
     HARDWARE_ENCODERS.forEach((encoder, i) => {
-        const vaapiDevice = hardwareDevices[i]
-        if (vaapiDevice) profiles.push({ ffmpegPath, encoder, vaapiDevice, toneMapper })
+        const hardware = hardwareDevices[i]
+        if (hardware) profiles.push({ ffmpegPath, encoder, vaapiDevice: hardware.device, toneMapper, tenBit: hardware.tenBit })
     })
-    if (hasLibx264) profiles.push({ ffmpegPath, encoder: 'libx264', vaapiDevice: null, toneMapper })
+    if (hasLibx264) profiles.push({ ffmpegPath, encoder: 'libx264', vaapiDevice: null, toneMapper, tenBit: false })
     return profiles
 }
 
@@ -140,7 +149,7 @@ export function getEncoderProfiles(): Promise<EncoderProfile[]> {
         .then((profiles) => {
             if (profiles.length === 0) {
                 // Nothing passed the tests; still try the plain software path.
-                profiles = [{ ffmpegPath: bundledFfmpegPath || 'ffmpeg', encoder: 'libx264', vaapiDevice: null, toneMapper: null }]
+                profiles = [{ ffmpegPath: bundledFfmpegPath || 'ffmpeg', encoder: 'libx264', vaapiDevice: null, toneMapper: null, tenBit: false }]
             }
             console.log('[stream] encoders:', profiles.map(describeProfile).join(' > '))
             return profiles
@@ -150,5 +159,5 @@ export function getEncoderProfiles(): Promise<EncoderProfile[]> {
 
 export function describeProfile(profile: EncoderProfile) {
     const binary = profile.ffmpegPath === bundledFfmpegPath ? 'bundled' : profile.ffmpegPath
-    return `${profile.encoder}${profile.vaapiDevice ? `@${profile.vaapiDevice}` : ''} (${binary}, tonemap: ${profile.toneMapper ?? 'none'})`
+    return `${profile.encoder}${profile.vaapiDevice ? `@${profile.vaapiDevice}` : ''} (${binary}, tonemap: ${profile.toneMapper ?? 'none'}${profile.tenBit ? ', 10-bit' : ''})`
 }
