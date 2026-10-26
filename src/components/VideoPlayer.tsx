@@ -1707,7 +1707,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
                         {/* Settings Menu */}
                         {showSettings && (
-                            <div className="absolute bottom-14 right-0 bg-black/90 backdrop-blur-md border border-white/10 rounded-xl p-2 min-w-[240px] shadow-2xl z-50 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                            <div className="absolute bottom-14 right-0 max-h-[calc(100vh-12rem)] overflow-y-auto overscroll-contain bg-black/90 backdrop-blur-md border border-white/10 rounded-xl p-2 min-w-[240px] shadow-2xl z-50 animate-in fade-in slide-in-from-bottom-2 duration-200">
                                 {renderSettingsContent()}
                             </div>
                         )}
