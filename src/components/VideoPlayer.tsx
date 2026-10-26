@@ -5,6 +5,9 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js/light'
+import { PgsRenderer } from 'libpgs'
+// The enum isn't exported at runtime, only its type
+import type { PgsRendererMode } from 'libpgs/dist/pgsRendererMode'
 import { Movie, VideoElementWithTracks, AudioTrack } from '../types'
 
 interface VideoPlayerProps {
@@ -81,10 +84,15 @@ interface PlaybackInfo {
 const CONVERSION_ERROR = 'Kino couldn’t convert this video for playback.'
 
 interface ActiveSubtitle {
-    vtt: string
+    /** Text subtitles, converted to WebVTT and shown through a <track>. */
+    vtt?: string
+    /** PGS image subtitles (.sup), drawn onto a canvas over the video by libpgs. */
+    pgs?: ArrayBuffer
     label: string
     language: string
 }
+
+const PGS_SUBTITLE_CODEC = 'hdmv_pgs_subtitle'
 
 const VTT_TIMESTAMP = /(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})/g
 
@@ -119,6 +127,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const bufferingTimeoutRef = useRef<NodeJS.Timeout>()
     const lastUiTimeRef = useRef(0)
     const subtitleObjectUrlRef = useRef<string | null>(null)
+    const pgsRendererRef = useRef<PgsRenderer | null>(null)
+    const pgsCanvasRef = useRef<HTMLCanvasElement>(null)
     const pendingSeekTimeRef = useRef<number | null>(null)
     const isScrubbingRef = useRef(false)
     const suppressBufferingUntilRef = useRef(0)
@@ -199,11 +209,16 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         return SUBTITLE_SIZES.some(s => s.value === stored) ? stored as SubtitleSize : 'medium'
     })
 
-    const revokeSubtitleObjectUrl = useCallback(() => {
+    const releaseSubtitleRendering = useCallback(() => {
         if (subtitleObjectUrlRef.current) {
             URL.revokeObjectURL(subtitleObjectUrlRef.current)
             subtitleObjectUrlRef.current = null
         }
+        pgsRendererRef.current?.dispose()
+        pgsRendererRef.current = null
+        // The canvas belongs to the player, so dispose() leaves the last subtitle drawn on it
+        const canvas = pgsCanvasRef.current
+        canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
     }, [])
 
     const clearBufferingTimeout = useCallback(() => {
@@ -241,10 +256,26 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         if (!video) return
 
         video.querySelectorAll('track').forEach(t => t.remove())
-        revokeSubtitleObjectUrl()
+        releaseSubtitleRendering()
         if (!subtitle) return
 
         const offset = isProgressiveRef.current ? streamOffsetRef.current : 0
+        if (subtitle.pgs) {
+            if (!pgsCanvasRef.current) return
+            // Main-thread mode needs no worker script, which a packaged app loading from file:// can't always start.
+            // It also keeps the canvas usable across renderers (a worker would take it over with transferControlToOffscreen).
+            const renderer = new PgsRenderer({
+                video,
+                canvas: pgsCanvasRef.current,
+                mode: 'mainThread' as PgsRendererMode,
+                timeOffset: offset,
+            })
+            renderer.loadFromBuffer(subtitle.pgs).catch(err => console.error('Failed to load PGS subtitle:', err))
+            pgsRendererRef.current = renderer
+            return
+        }
+        if (!subtitle.vtt) return
+
         const url = URL.createObjectURL(new Blob([shiftVttCues(subtitle.vtt, offset)], { type: 'text/vtt' }))
         const trackEl = document.createElement('track')
         trackEl.kind = 'subtitles'
@@ -260,7 +291,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 trackEl.track.mode = 'showing'
             }
         }, 100)
-    }, [revokeSubtitleObjectUrl])
+    }, [releaseSubtitleRendering])
 
     /** Whether the user expects playback to be running (true while a paused-looking stream is loading). */
     const isPlaybackIntended = useCallback(() => {
@@ -481,9 +512,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 document.exitPictureInPicture().catch(() => undefined)
             }
             clearBufferingTimeout()
-            revokeSubtitleObjectUrl()
+            releaseSubtitleRendering()
         }
-    }, [clearBufferingTimeout, revokeSubtitleObjectUrl])
+    }, [clearBufferingTimeout, releaseSubtitleRendering])
 
     // Helper: Format time (seconds -> MM:SS)
     const formatTime = (time: number) => {
@@ -590,7 +621,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         setTextTracks([])
         activeSubtitleRef.current = null
         tracksLoadedForMovieRef.current = null
-        revokeSubtitleObjectUrl()
+        releaseSubtitleRendering()
         if (videoRef.current) {
             const existingTracks = videoRef.current.querySelectorAll('track')
             existingTracks.forEach(t => {
@@ -605,7 +636,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 textTrackList[i].mode = 'disabled'
             }
         }
-    }, [movie.id, revokeSubtitleObjectUrl])
+    }, [movie.id, releaseSubtitleRendering])
 
     useEffect(() => {
         if (videoRef.current) {
@@ -856,14 +887,18 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                     kind: 'subtitles',
                     label: t.label,
                     language: t.language,
+                    codec: t.codec,
+                    isForced: t.isForced,
                     mode: 'hidden' as TextTrackMode
                 }))
                 // Add to state but don't add to video yet until selected
                 setTextTracks(tracks as any)
                 if (storedSubtitleLang) {
-                    const subtitleIndex = tracks.findIndex((track: { language: string; label: string }) =>
+                    const matches = (track: { language: string; label: string }) =>
                         (track.language && track.language === storedSubtitleLang) || (track.label && track.label === storedSubtitleLang)
-                    )
+                    // Prefer a full dialogue track over a signs/songs-only one in the same language
+                    let subtitleIndex = tracks.findIndex((track: { language: string; label: string; isForced: boolean }) => !track.isForced && matches(track))
+                    if (subtitleIndex < 0) subtitleIndex = tracks.findIndex(matches)
                     if (subtitleIndex >= 0) {
                         setTimeout(() => toggleSubtitleTrack(subtitleIndex, tracks), 100)
                     }
@@ -956,10 +991,17 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         }
 
         try {
-            const vttContent = await window.ipcRenderer.invoke('media:extract-subtitle-content', movie.file_path, parseInt((track as any).id))
+            const streamIndex = parseInt((track as any).id)
+            let content: Pick<ActiveSubtitle, 'vtt' | 'pgs'>
+            if ((track as any).codec === PGS_SUBTITLE_CODEC) {
+                const bytes: Uint8Array = await window.ipcRenderer.invoke('media:extract-pgs-subtitle', movie.file_path, streamIndex)
+                content = { pgs: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer }
+            } else {
+                content = { vtt: await window.ipcRenderer.invoke('media:extract-subtitle-content', movie.file_path, streamIndex) }
+            }
 
             if (videoRef.current) {
-                activeSubtitleRef.current = { vtt: vttContent, label: track.label, language: track.language }
+                activeSubtitleRef.current = { ...content, label: track.label, language: track.language }
                 attachActiveSubtitle()
 
                 const newTracks = trackList.map((t, i) => ({
@@ -988,7 +1030,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             const newTracks = textTracks.map(t => ({ ...t, mode: 'hidden' }))
             setTextTracks(newTracks as any)
         }
-        revokeSubtitleObjectUrl()
+        releaseSubtitleRendering()
         removeStoredValue(STORAGE_KEYS.subtitle)
         setSettingsTab('main')
     }
@@ -1342,6 +1384,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             ref={containerRef}
             data-video-player
             data-subtitle-size={subtitleSize}
+            data-controls-visible={showControls}
             className="fixed inset-0 z-50 bg-black flex items-center justify-center group select-none"
             onMouseMove={showControlsHandler}
             onMouseLeave={() => isPlaying && !showSettings && setShowControls(false)}
@@ -1397,6 +1440,10 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                         suppressBufferingUntilRef.current = Date.now() + 150
                         hideBufferingIndicator()
                     }}
+                />
+                <canvas
+                    ref={pgsCanvasRef}
+                    className="pgs-subtitles absolute inset-0 w-full h-full object-contain pointer-events-none"
                 />
             </div>
 

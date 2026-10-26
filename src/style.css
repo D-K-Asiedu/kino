@@ -59,6 +59,29 @@ video::-webkit-media-text-track-container {
     bottom: 80px;
 }
 
+/* PGS subtitles are images, so size scales the whole overlay from the bottom centre (same ratios as the cue sizes) */
+.pgs-subtitles {
+    transform-origin: 50% 100%;
+    transition: translate 300ms;
+}
+
+[data-subtitle-size="small"] .pgs-subtitles {
+    scale: 0.75;
+}
+
+[data-subtitle-size="large"] .pgs-subtitles {
+    scale: 1.25;
+}
+
+[data-subtitle-size="xlarge"] .pgs-subtitles {
+    scale: 1.5;
+}
+
+/* Lift them clear of the control bar while it's showing */
+[data-controls-visible="true"] .pgs-subtitles {
+    translate: 0 -80px;
+}
+
 @layer components {
     /* Hide scrollbar for Chrome, Safari and Opera */
     .no-scrollbar::-webkit-scrollbar {

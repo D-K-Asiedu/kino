@@ -159,6 +159,11 @@ export function registerIPC() {
         return extractSubtitleContent(filePath, trackIndex)
     })
 
+    ipcMain.handle('media:extract-pgs-subtitle', async (_, filePath, trackIndex) => {
+        const { extractPgsSubtitle } = await import('./ffmpeg')
+        return extractPgsSubtitle(filePath, trackIndex)
+    })
+
     // Secure folder handlers
     ipcMain.handle('secure:status', () => getSecureStatus())
     ipcMain.handle('secure:set-password', async (_, password: string) => {

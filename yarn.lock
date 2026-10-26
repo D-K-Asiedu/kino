@@ -2018,6 +2018,11 @@ lazystream@^1.0.0:
   dependencies:
     readable-stream "^2.0.5"
 
+libpgs@^0.9.0:
+  version "0.9.0"
+  resolved "https://registry.yarnpkg.com/libpgs/-/libpgs-0.9.0.tgz#aac4f3452829290948b970d77cd5a622553ba1a9"
+  integrity sha512-kKgKKelcc2dRahni5WysOq9CjglObiGp3zPqlupYb9O0Ewwiu4OMDbyRP/YH043IXub3D6rrR15+9od4Yu7JWA==
+
 lilconfig@^3.0.0, lilconfig@^3.1.3:
   version "3.1.3"
   resolved "https://registry.npmjs.org/lilconfig/-/lilconfig-3.1.3.tgz"

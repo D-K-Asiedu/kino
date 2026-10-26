@@ -26,8 +26,16 @@ export interface MediaMetadata {
         label: string
         codec: string
         isDefault: boolean
+        /** Only covers signs/songs (forced subtitles), not dialogue. */
+        isForced: boolean
     }[]
 }
+
+// Bitmap subtitles the player can't draw: they are images, so they can't be converted to WebVTT either.
+// PGS is drawn as images by the renderer (libpgs).
+const UNSUPPORTED_SUBTITLE_CODECS = new Set(['dvd_subtitle', 'dvb_subtitle', 'xsub'])
+
+const FORCED_SUBTITLE_TITLE = /\b(signs?|songs?|forced)\b/i
 
 export async function getMediaMetadata(filePath: string): Promise<MediaMetadata> {
     return new Promise((resolve, reject) => {
@@ -49,13 +57,14 @@ export async function getMediaMetadata(filePath: string): Promise<MediaMetadata>
                 }))
 
             const subtitleTracks = metadata.streams
-                .filter(s => s.codec_type === 'subtitle')
+                .filter(s => s.codec_type === 'subtitle' && !UNSUPPORTED_SUBTITLE_CODECS.has(s.codec_name || ''))
                 .map((s, i) => ({
                     index: s.index,
                     language: s.tags?.language || 'und',
                     label: s.tags?.title || `Subtitle ${i + 1}`,
                     codec: s.codec_name || 'unknown',
-                    isDefault: s.disposition?.default === 1
+                    isDefault: s.disposition?.default === 1,
+                    isForced: s.disposition?.forced === 1 || FORCED_SUBTITLE_TITLE.test(s.tags?.title || '')
                 }))
 
             resolve({ audioTracks, subtitleTracks })
@@ -85,4 +94,31 @@ export async function extractSubtitleContent(filePath: string, trackIndex: numbe
     const vttPath = await extractSubtitle(filePath, trackIndex)
     const fs = await import('fs/promises')
     return fs.readFile(vttPath, 'utf-8')
+}
+
+/** Copy a PGS track out as a .sup file (no re-encoding) and return its bytes for the renderer to draw. */
+export async function extractPgsSubtitle(filePath: string, trackIndex: number): Promise<Buffer> {
+    const tempDir = app.getPath('temp')
+    const outputPath = path.join(tempDir, `kino_sub_${path.basename(filePath)}_${trackIndex}.sup`)
+
+    await new Promise<void>((resolve, reject) => {
+        ffmpeg(filePath)
+            .output(outputPath)
+            .outputOptions([
+                `-map 0:${trackIndex}`,
+                '-c copy',
+                '-f sup',
+                '-y'
+            ])
+            .on('end', () => resolve())
+            .on('error', (err) => reject(err))
+            .run()
+    })
+
+    const fs = await import('fs/promises')
+    try {
+        return await fs.readFile(outputPath)
+    } finally {
+        await fs.rm(outputPath, { force: true })
+    }
 }
