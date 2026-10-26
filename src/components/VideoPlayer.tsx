@@ -1084,6 +1084,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
     const handleResume = () => {
         // The source was already loaded at the saved position; just start playing.
+        // Record the intent too: a converted stream that restarts now (e.g. switching to the preferred
+        // audio track) reloads the element, which silently drops this play() and leaves it paused.
+        pendingPlayIntentRef.current = true
         setAutoPlayEnabled(true)
         if (videoRef.current && savedProgress) {
             // Converted streams may have started at the keyframe before the saved position.
@@ -1097,9 +1100,11 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     }
 
     const handleRestart = () => {
+        pendingPlayIntentRef.current = true
         setAutoPlayEnabled(true)
-        if (isProgressiveRef.current) {
-            void startStreamAt(0, true)
+        if (isProgressiveRef.current || hlsRef.current) {
+            // A converted stream was started at the saved position (hls.js would seek back to it), so start a new one.
+            restartConversionAt(0, true)
         } else if (videoRef.current) {
             pendingStartTimeRef.current = 0
             videoRef.current.currentTime = 0
