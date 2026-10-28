@@ -164,6 +164,11 @@ export function registerIPC() {
         return extractPgsSubtitle(filePath, trackIndex)
     })
 
+    ipcMain.handle('media:prefetch-subtitles', async (_, filePath) => {
+        const { prefetchSubtitles } = await import('./ffmpeg')
+        prefetchSubtitles(filePath)
+    })
+
     // Secure folder handlers
     ipcMain.handle('secure:status', () => getSecureStatus())
     ipcMain.handle('secure:set-password', async (_, password: string) => {

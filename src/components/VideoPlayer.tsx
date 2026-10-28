@@ -1,7 +1,7 @@
 import {
     Play, Pause, Volume2, VolumeX, Maximize, Minimize,
     SkipBack, SkipForward, ChevronLeft, Gauge, MessageSquare, Languages,
-    History, RotateCcw, Settings, Check, Keyboard, PictureInPicture2, Type, X
+    History, RotateCcw, Settings, Check, Keyboard, PictureInPicture2, Type, X, Loader2
 } from 'lucide-react'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js/light'
@@ -149,6 +149,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     // True while a new converted stream's start is being resolved; the old stream's time updates are stale.
     const streamStartPendingRef = useRef(false)
     const activeSubtitleRef = useRef<ActiveSubtitle | null>(null)
+    /** Bumped on every subtitle change, so a slow extraction can't override a newer choice. */
+    const subtitleRequestRef = useRef(0)
     // Direct playback: position to seek to once metadata has loaded (resume point).
     const pendingStartTimeRef = useRef(0)
     // While a new stream loads the element reports paused, so remember whether playback should
@@ -177,6 +179,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     })
     const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([])
     const [textTracks, setTextTracks] = useState<TextTrack[]>([])
+    const [loadingSubtitleIndex, setLoadingSubtitleIndex] = useState<number | null>(null)
     const [playbackInfo, setPlaybackInfo] = useState<PlaybackInfo | null>(null)
     const [videoSrc, setVideoSrc] = useState<string | undefined>(undefined)
     // hls.js sets the element's source itself, so videoSrc stays empty during HLS playback.
@@ -619,6 +622,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         setShowResumePrompt(false)
         setAudioTracks([])
         setTextTracks([])
+        subtitleRequestRef.current++
+        setLoadingSubtitleIndex(null)
         activeSubtitleRef.current = null
         tracksLoadedForMovieRef.current = null
         releaseSubtitleRendering()
@@ -990,6 +995,12 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             return
         }
 
+        // Show the choice right away: the first extraction from a file can take a few seconds.
+        const request = ++subtitleRequestRef.current
+        setTextTracks(trackList.map((t, i) => ({ ...t, mode: i === index ? 'showing' : 'hidden' })) as any)
+        setLoadingSubtitleIndex(index)
+        setSettingsTab('main')
+
         try {
             const streamIndex = parseInt((track as any).id)
             let content: Pick<ActiveSubtitle, 'vtt' | 'pgs'>
@@ -999,29 +1010,28 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             } else {
                 content = { vtt: await window.ipcRenderer.invoke('media:extract-subtitle-content', movie.file_path, streamIndex) }
             }
+            // A later choice (or Off) replaced this one while it loaded
+            if (request !== subtitleRequestRef.current) return
 
-            if (videoRef.current) {
-                activeSubtitleRef.current = { ...content, label: track.label, language: track.language }
-                attachActiveSubtitle()
-
-                const newTracks = trackList.map((t, i) => ({
-                    ...t,
-                    mode: i === index ? 'showing' : 'hidden'
-                }))
-                setTextTracks(newTracks as any)
-            }
+            activeSubtitleRef.current = { ...content, label: track.label, language: track.language }
+            attachActiveSubtitle()
             const subtitleIdentifier = track.language || track.label
             if (subtitleIdentifier) {
                 setStoredValue(STORAGE_KEYS.subtitle, subtitleIdentifier)
             }
         } catch (err) {
+            if (request !== subtitleRequestRef.current) return
             console.error('Failed to load subtitle:', err)
+            // Put the menu back on what's actually showing
+            setTextTracks(trackList as any)
+        } finally {
+            if (request === subtitleRequestRef.current) setLoadingSubtitleIndex(null)
         }
-
-        setSettingsTab('main')
     }
 
     const disableSubtitles = () => {
+        subtitleRequestRef.current++
+        setLoadingSubtitleIndex(null)
         activeSubtitleRef.current = null
         if (videoRef.current) {
             const existingTracks = videoRef.current.querySelectorAll('track')
@@ -1226,7 +1236,11 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                             </div>
                         </button>
                         <button
-                            onClick={() => setSettingsTab('subtitles')}
+                            onClick={() => {
+                                setSettingsTab('subtitles')
+                                // Get the tracks ready while the user picks one
+                                void window.ipcRenderer.invoke('media:prefetch-subtitles', movie.file_path).catch(() => undefined)
+                            }}
                             className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
                         >
                             <div className="flex items-center gap-2">
@@ -1234,6 +1248,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                                 <span>Subtitles</span>
                             </div>
                             <div className="flex items-center gap-1 text-white/50 text-xs">
+                                {loadingSubtitleIndex !== null && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                                 <span>{textTracks.find(t => t.mode === 'showing')?.label || 'Off'}</span>
                                 <ChevronLeft className="w-4 h-4 rotate-180" />
                             </div>
@@ -1328,7 +1343,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                                 className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
                             >
                                 <span>{track.label || `Track ${i + 1}`} {track.language && `(${track.language})`}</span>
-                                {track.mode === 'showing' && <Check className="w-4 h-4 text-primary" />}
+                                {track.mode === 'showing' && (loadingSubtitleIndex === i
+                                    ? <Loader2 className="w-4 h-4 animate-spin text-white/60" />
+                                    : <Check className="w-4 h-4 text-primary" />)}
                             </button>
                         ))}
                     </div>
