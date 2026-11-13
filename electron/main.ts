@@ -9,6 +9,7 @@ import { generateDefaultPlaylists } from './lib/playlists'
 import { handleStreamRequest, shutdownStreams, warmUpEncoders } from './lib/streaming'
 import { pruneSubtitleCache, removeStalePrivateSubtitles } from './lib/subtitles'
 import { lockSecure, removeStaleSecureCache, shutdownSecure } from './lib/secure'
+import { initialWindowState, trackWindowState } from './lib/windowState'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -101,11 +102,22 @@ function resolveIconPath() {
 }
 
 function createWindow() {
+  const windowState = initialWindowState()
   win = new BrowserWindow({
     icon: resolveIconPath(),
+    ...windowState.bounds,
+    minWidth: windowState.minWidth,
+    minHeight: windowState.minHeight,
+    // Shown once the first frame is drawn, already maximized if it was, so it doesn't jump.
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
     },
+  })
+  trackWindowState(win, windowState)
+  win.once('ready-to-show', () => {
+    if (windowState.maximized) win?.maximize()
+    win?.show()
   })
 
   win.webContents.on('did-finish-load', () => {
