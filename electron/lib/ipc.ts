@@ -141,7 +141,9 @@ export function registerIPC() {
 
     ipcMain.handle('media:stop-streams', async () => {
         const { stopAllStreams } = await import('./streaming')
+        const { removePrivateSubtitles } = await import('./subtitles')
         stopAllStreams()
+        void removePrivateSubtitles()
     })
 
     ipcMain.handle('media:get-metadata', async (_, filePath) => {
@@ -149,23 +151,13 @@ export function registerIPC() {
         return getMediaMetadata(filePath)
     })
 
-    ipcMain.handle('media:extract-subtitle', async (_, filePath, trackIndex) => {
-        const { extractSubtitle } = await import('./ffmpeg')
-        return extractSubtitle(filePath, trackIndex)
-    })
-
-    ipcMain.handle('media:extract-subtitle-content', async (_, filePath, trackIndex) => {
-        const { extractSubtitleContent } = await import('./ffmpeg')
-        return extractSubtitleContent(filePath, trackIndex)
-    })
-
-    ipcMain.handle('media:extract-pgs-subtitle', async (_, filePath, trackIndex) => {
-        const { extractPgsSubtitle } = await import('./ffmpeg')
-        return extractPgsSubtitle(filePath, trackIndex)
+    ipcMain.handle('media:get-subtitle', async (_, filePath: string, trackId: string, plainText?: boolean) => {
+        const { getSubtitle } = await import('./subtitles')
+        return getSubtitle(filePath, String(trackId), plainText === true)
     })
 
     ipcMain.handle('media:prefetch-subtitles', async (_, filePath) => {
-        const { prefetchSubtitles } = await import('./ffmpeg')
+        const { prefetchSubtitles } = await import('./subtitles')
         prefetchSubtitles(filePath)
     })
 

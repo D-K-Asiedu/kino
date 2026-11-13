@@ -11,6 +11,16 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
+  // The styled-subtitle renderer (jassub) runs libass in a module worker that imports its WebAssembly glue.
+  worker: {
+    format: 'es',
+  },
+  // It finds its worker, WebAssembly and default font relative to its own file, which the dev
+  // server's dependency pre-bundling would move; its CommonJS dependencies still need pre-bundling.
+  optimizeDeps: {
+    exclude: ['jassub'],
+    include: ['jassub > rvfc-polyfill', 'jassub > throughput'],
+  },
   plugins: [
     react(),
     electron({

@@ -2,7 +2,9 @@
 
 Kino ships for Linux, Windows and macOS. The current conversion pipeline was built and tested only on Linux (Intel Iris Xe, a library of HEVC files ≤1080p). This plan covers the changes needed for it to work well on every platform, and how to test them on Windows.
 
-Status: Phase 0 is done on Windows (2026-10-02). The baseline passes after three fixes, listed under [Phase 0 findings](#phase-0-findings). Phases 1 and 2 are done on Windows (2026-10-02); their Linux checks haven't been run yet. Phases 3–7 are not implemented. Work through them in order; each one ends with a test checklist.
+Status: Phase 0 is done on Windows (2026-10-02). The baseline passes after three fixes, listed under [Phase 0 findings](#phase-0-findings). Phases 1 and 2 are done on Windows (2026-10-02); their Linux checks haven't been run yet. Phases 3, 5 and 6 are done and tested on Linux (2026-11-13). Phase 4 is implemented (2026-11-13) but the NVENC, QSV, AMF and VideoToolbox encoders have **not been run on hardware that has them**; its Windows/macOS checklist is still open. Phase 7 is not implemented.
+
+Subtitles were reworked on 2026-11-13 as well; see [Subtitles](#subtitles).
 
 ## How playback works today
 
@@ -13,7 +15,8 @@ Read this first; file references are to the current code.
   - `transcode` with `copyVideo: true` — only the audio or container is unsupported. Served as one progressive fragmented MP4 from [`electron/lib/streaming.ts`](../electron/lib/streaming.ts) (`kino-stream://play/...`). The player offsets its clock by the keyframe the stream starts on (`media:resolve-stream-start`).
   - `transcode` with `copyVideo: false` (`hls: true`) — video is re-encoded and served as on-demand HLS from [`electron/lib/hls.ts`](../electron/lib/hls.ts) (`kino-stream://hls/...`), played with hls.js.
 - **Supported codecs are hard-coded** in `media.ts`: video `h264` (8-bit only), `vp8`, `vp9`, `av1`; audio `aac`, `mp3`, `opus`, `vorbis`, `flac`; direct containers `.mp4 .m4v .mov .webm .mkv`.
-- **Encoders** — [`electron/lib/encoders.ts`](../electron/lib/encoders.ts) test-runs the bundled ffmpeg and any system ffmpeg at startup and ranks what works: `h264_vaapi` > `vp9_vaapi` > `libx264`. A stream that produces no output falls back to the next profile. The chosen list is logged as `[stream] encoders: ...`.
+- **Encoders** — [`electron/lib/encoders.ts`](../electron/lib/encoders.ts) test-runs the bundled ffmpeg and any system ffmpeg shortly after the window opens and ranks what works: `h264_nvenc` > `h264_qsv` > `h264_amf` > `h264_videotoolbox` > `h264_vaapi` > `vp9_vaapi` > `libx264` (each GPU encoder only on the platforms it exists on). A GPU encoder must write four correct one-second HLS segments to be used. A stream that produces no output falls back to the next profile. The chosen list is logged as `[stream] encoders: ...`.
+- **Probing** — one cached ffprobe per file (`probeMedia()` in `media.ts`) feeds the playback decision, the track lists and subtitle extraction.
 - **HLS sessions** cache 3-second segments in `os.tmpdir()/kino-hls/<pid>/`. The encoder is paused with `SIGSTOP` when it gets 20 segments (~60s) ahead of the player, and resumed with `SIGCONT`. ffmpeg runs with the session folder as its working directory and writes relative file names (see Phase 0 findings). Segments are deleted when the player closes and when the app quits: `before-quit` waits up to 3s for `shutdownStreams()`. Folders left behind by a crash are removed the next time an HLS session starts.
 - **Player** — [`src/components/VideoPlayer.tsx`](../src/components/VideoPlayer.tsx): `init` effect picks the mode, `startHlsAt` / `startStreamAt` start conversions, `toggleAudioTrack` switches tracks, the `<video onError>` handler shows errors.
 
@@ -165,6 +168,8 @@ Limitation: when audio is wrongly reported as supported, Chromium plays the vide
 
 ## Phase 3 — Audio track checks (list item 5)
 
+**Done (2026-11-13), tested on Linux.** `media:get-metadata` marks each audio track `supported`; choosing an unsupported one during direct playback switches to copy mode with that track at the current position (the track stays selected, the "Converted" badge appears). Checked with `h264_two_audio.mkv`: direct at 0:33 → AC3 track → converted stream, audio decoding, clock continued at 0:38; an external subtitle stayed in sync after the switch. The audio menu now shows channels and codec.
+
 **Problem:** only the first audio track is checked. `h264_two_audio.mkv` plays directly; switching to the AC3 track uses the element's `audioTracks` API and fails silently (no sound).
 
 **Change:**
@@ -180,6 +185,8 @@ Limitation: when audio is wrongly reported as supported, Chromium plays the vide
 - [ ] Progress bar and subtitles stay in sync after the switch.
 
 ## Phase 4 — More GPU encoders (list item 3)
+
+**Implemented (2026-11-13), not tested on the hardware.** The four encoders are in the `ENCODERS` table in `encoders.ts` with the arguments below, and the startup test is the HLS keyframe test from step 2 (an encoder that fails it isn't used at all, rather than being kept for progressive streams). `ffmpeg -encoders` is read first, so encoders the build lacks aren't test-run. On the Linux dev machine the test passes for `vp9_vaapi` (8- and 10-bit) and the list is unchanged. `h264_videotoolbox` uses a bitrate (4/8/20 Mbit/s by height) because constant quality only exists on Apple Silicon. Everything in the checklist below still needs running on Windows and macOS.
 
 **Problem:** GPU encoding only works through VAAPI on Linux. NVIDIA, Windows and macOS encoders aren't used.
 
@@ -207,6 +214,8 @@ Limitation: when audio is wrongly reported as supported, Chromium plays the vide
 
 ## Phase 5 — Deinterlacing (list item 6)
 
+**Done (2026-11-13), tested on Linux** with interlaced MPEG-2 in `.ts` and interlaced H.264 in `.mkv`: both re-encode with `bwdif` first in the filter chain and show no comb lines. The decision in step 3 was taken as recommended: interlaced video is re-encoded even when its codec would play directly.
+
 **Problem:** interlaced sources (DVD, broadcast TV) are converted without deinterlacing, so motion shows comb lines. Chromium doesn't deinterlace either, so interlaced H.264 played directly also combs.
 
 **Change:**
@@ -221,6 +230,8 @@ Limitation: when audio is wrongly reported as supported, Chromium plays the vide
 - [ ] Progressive files are unaffected (compare a frame before/after).
 
 ## Phase 6 — More file types (list item 7)
+
+**Done (2026-11-13).** The list in `watcher.ts` is now `.mkv .mp4 .m4v .mov .webm .avi .wmv .asf .flv .f4v .ts .m2ts .mts .mpg .mpeg .vob .ogv .ogm .3gp .3g2 .divx .rm .rmvb .mxf`. Checked `.m4v` (direct), `.flv` and `.ts` (converted). Conversion also maps the real video stream by index now, so a file whose first "video" stream is cover art plays the film, not the picture.
 
 **Change:**
 
@@ -243,6 +254,20 @@ Limitation: when audio is wrongly reported as supported, Chromium plays the vide
 **Test:**
 
 - [ ] Install the Windows installer on a clean machine (or VM) without dev tools; a converted video plays.
+
+## Subtitles
+
+Reworked on 2026-11-13 in [`electron/lib/subtitles.ts`](../electron/lib/subtitles.ts); tested on Linux in dev, in a `vite build` run from `file://`, and in a packaged (asar) build.
+
+- **Styled subtitles (ASS/SSA)** are drawn by libass in the player ([jassub](https://github.com/ThaUnknown/jassub), a WebAssembly build that runs in a worker) with the fonts attached to the video, instead of being flattened to plain text. Fonts are served to the worker from `kino-stream://fonts/...`. If the worker can't start, the track is shown as plain text (`media:get-subtitle` with `plainText`). The subtitle-size setting and the lift above the control bar don't apply to styled subtitles: they carry their own sizes and positions.
+- **Subtitle files beside the video** (`.srt .vtt .ass .ssa .smi .sub .sup`) are listed with the embedded tracks: same name as the video, or in a `Subs`/`Subtitles` folder. Language comes from the file name. Files that aren't UTF-8 are read as Windows-1252.
+- **Cache.** Extracting embedded tracks reads the whole video, so every track and font is extracted in one pass into `userData/cache/subtitles/<hash of path, size, mtime>/` and reused next time (369 ms → 6 ms on a 360 MB episode on SSD). The cache is capped at 500 MB, least recently used first. Videos from the secure folder are never cached there: their subtitles go to a temp folder that is removed when the player closes and on quit.
+- **Subtitle delay** per video: G/H or the settings menu, in 0.1 s steps.
+- Still not shown: DVD (VobSub) and DVB image subtitles.
+
+`yarn dev` note: jassub must stay in `optimizeDeps.exclude` in `vite.config.ts`. Pre-bundled, it can't find its worker and WebAssembly files.
+
+Not tested on Windows or macOS: the styled renderer in a packaged build, and font/track extraction paths (ffmpeg runs with the cache folder as its working directory and relative output names, as HLS does).
 
 ## Later
 

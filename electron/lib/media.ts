@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import ffmpeg from 'fluent-ffmpeg'
 import ffprobeStatic from 'ffprobe-static'
-import { EncoderProfile, LIBPLACEBO_TONEMAP, ZSCALE_TONEMAP } from './encoders'
+import { EncoderProfile, LIBPLACEBO_TONEMAP, ZSCALE_TONEMAP, encoderArgs, encoderDeviceArgs, encoderPixelFormat, isHardwareEncoder } from './encoders'
 
 // Probing and ffmpeg arguments shared by the progressive stream (streaming.ts) and HLS (hls.ts).
 
@@ -19,6 +19,8 @@ const HIGH_BIT_DEPTH_PIX_FMT = /p1[0-6](le|be)$/
 const BASELINE_AUDIO_CODECS = new Set(['aac', 'mp3', 'opus', 'vorbis', 'flac'])
 const DIRECT_CONTAINERS = new Set(['.mp4', '.m4v', '.mov', '.webm', '.mkv'])
 const HDR_TRANSFERS = new Set(['smpte2084', 'arib-std-b67'])
+// ffprobe's field_order for interlaced video (top/bottom field first, coded or displayed).
+const INTERLACED_FIELD_ORDERS = new Set(['tt', 'bb', 'tb', 'bt'])
 
 // Software encoding can't keep 4K in real time, so CPU-encoded streams are capped at 1080p.
 const SOFTWARE_MAX_HEIGHT = 1080
@@ -53,6 +55,10 @@ export interface MediaDetails {
     isHighBitDepth: boolean
     height: number
     videoCodec: string | null
+    /** ffprobe index of the video stream that plays (cover art is skipped); null when there is none. */
+    videoStreamIndex: number | null
+    /** Source is interlaced (DVD, broadcast TV) and is deinterlaced when re-encoded. */
+    interlaced: boolean
     /** Reordered frames; ffmpeg adjusts -ss for these (see streaming.ts buildArgs). */
     videoHasBFrames: boolean
 }
@@ -81,10 +87,14 @@ export function setDecoderSupport(support: unknown) {
 
 interface ProbeCacheEntry {
     mtimeMs: number
-    data: ffmpeg.FfprobeData
+    size: number
+    data: Promise<ffmpeg.FfprobeData>
 }
 
-// Raw ffprobe output; the playback decision is made per call, since decoder support and failures change.
+// Raw ffprobe output, shared by everything that needs to know about a file (playback decision, track
+// lists, subtitles), so opening a video runs ffprobe once. The playback decision is made per call,
+// since decoder support and failures change. Oldest entries are dropped past the limit.
+const PROBE_CACHE_LIMIT = 200
 const probeCache = new Map<string, ProbeCacheEntry>()
 
 // How far each file has fallen back this session after playback failed in the player (see forceConversion).
@@ -94,6 +104,32 @@ function ffprobe(filePath: string): Promise<ffmpeg.FfprobeData> {
     return new Promise((resolve, reject) => {
         ffmpeg.ffprobe(filePath, (err, data) => (err ? reject(err) : resolve(data)))
     })
+}
+
+/** ffprobe output for a file; cached until the file changes. */
+export async function probeMedia(filePath: string): Promise<ffmpeg.FfprobeData> {
+    const stats = await fs.promises.stat(filePath)
+    let cached = probeCache.get(filePath)
+    if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+        // Move to the end, so the least recently used entry is the first key.
+        probeCache.delete(filePath)
+        probeCache.set(filePath, cached)
+        return cached.data
+    }
+    const entry: ProbeCacheEntry = { mtimeMs: stats.mtimeMs, size: stats.size, data: ffprobe(filePath) }
+    cached = entry
+    probeCache.set(filePath, entry)
+    // A failed probe isn't kept; the next call tries again.
+    entry.data.catch(() => {
+        if (probeCache.get(filePath) === entry) probeCache.delete(filePath)
+    })
+    while (probeCache.size > PROBE_CACHE_LIMIT) probeCache.delete(probeCache.keys().next().value as string)
+    return entry.data
+}
+
+/** The stream that plays as the picture: embedded cover art, which ffprobe reports as video, is skipped. */
+function findVideoStream(data: ffmpeg.FfprobeData) {
+    return data.streams.find(s => s.codec_type === 'video' && s.disposition?.attached_pic !== 1)
 }
 
 function isVideoStreamSupported(stream: ffmpeg.FfprobeStream | undefined) {
@@ -109,7 +145,8 @@ function isVideoStreamSupported(stream: ffmpeg.FfprobeStream | undefined) {
     return false
 }
 
-function isAudioCodecSupported(codec: string) {
+/** Whether the player can decode this audio codec itself; other codecs are converted to AAC. */
+export function isAudioCodecSupported(codec: string) {
     if (BASELINE_AUDIO_CODECS.has(codec)) return true
     const key = OPTIONAL_AUDIO_CODECS[codec]
     return !!key && !!decoderSupport[key]
@@ -119,12 +156,14 @@ function isAudioCodecSupported(codec: string) {
 const Level = { Direct: 0, CopyVideo: 1, Reencode: 2 } as const
 
 function decidePlayback(filePath: string, data: ffmpeg.FfprobeData): { info: PlaybackInfo, video: ffmpeg.FfprobeStream | undefined } {
-    // Ignore embedded cover art, which ffprobe reports as a video stream.
-    const video = data.streams.find(s => s.codec_type === 'video' && s.disposition?.attached_pic !== 1)
+    const video = findVideoStream(data)
     const audio = data.streams.find(s => s.codec_type === 'audio')
     const duration = Number(data.format?.duration) || 0
 
-    const videoOk = isVideoStreamSupported(video)
+    // Chromium doesn't deinterlace, so interlaced video is re-encoded (and deinterlaced) even when
+    // its codec would play directly.
+    const interlaced = INTERLACED_FIELD_ORDERS.has(String(video?.field_order ?? ''))
+    const videoOk = isVideoStreamSupported(video) && !interlaced
     const audioOk = !audio || isAudioCodecSupported(audio.codec_name ?? '')
     const containerOk = DIRECT_CONTAINERS.has(path.extname(filePath).toLowerCase())
 
@@ -134,13 +173,15 @@ function decidePlayback(filePath: string, data: ffmpeg.FfprobeData): { info: Pla
     if (level === Level.Direct) return { info: { mode: 'direct', duration, copyVideo: true, hls: false, reason: null }, video }
 
     const problems = [
-        !videoOk && `video codec ${video?.codec_name ?? 'unknown'}${video?.pix_fmt ? ` (${video.pix_fmt})` : ''}`,
+        !videoOk && (interlaced
+            ? 'interlaced video'
+            : `video codec ${video?.codec_name ?? 'unknown'}${video?.pix_fmt ? ` (${video.pix_fmt})` : ''}`),
         !audioOk && `audio codec ${audio?.codec_name}`,
         !containerOk && `container ${path.extname(filePath)}`,
     ].filter(Boolean)
     const reason = level > natural
         ? `${natural === Level.Direct ? 'Direct playback' : 'Copying the video'} failed in the player`
-        : `Unsupported ${problems.join(', ')}`
+        : `Needs converting: ${problems.join(', ')}`
     // Copied video can only be cut at keyframes, so only re-encoded video uses HLS. Its playlist is
     // laid out from the duration, so that's needed up front.
     const copyVideo = level === Level.CopyVideo
@@ -148,23 +189,27 @@ function decidePlayback(filePath: string, data: ffmpeg.FfprobeData): { info: Pla
 }
 
 export async function getMediaDetails(filePath: string): Promise<MediaDetails> {
-    const stats = await fs.promises.stat(filePath)
-    let cached = probeCache.get(filePath)
-    if (!cached || cached.mtimeMs !== stats.mtimeMs) {
-        cached = { mtimeMs: stats.mtimeMs, data: await ffprobe(filePath) }
-        probeCache.set(filePath, cached)
-    }
-
-    const { info, video } = decidePlayback(filePath, cached.data)
+    const data = await probeMedia(filePath)
+    const { info, video } = decidePlayback(filePath, data)
     return {
         info,
-        startTime: Number(cached.data.format?.start_time) || 0,
+        startTime: Number(data.format?.start_time) || 0,
         isHdr: HDR_TRANSFERS.has(String(video?.color_transfer ?? '')),
         isHighBitDepth: HIGH_BIT_DEPTH_PIX_FMT.test(String(video?.pix_fmt ?? '')),
         height: Number(video?.height) || 0,
         videoCodec: video?.codec_name ?? null,
+        videoStreamIndex: video ? video.index : null,
+        interlaced: INTERLACED_FIELD_ORDERS.has(String(video?.field_order ?? '')),
         videoHasBFrames: Number(video?.has_b_frames) > 0,
     }
+}
+
+/** `-map` arguments for the picture and one audio track (the first when `audioStreamIndex` is null). */
+export function streamMapArgs(media: MediaDetails, audioStreamIndex: number | null) {
+    return [
+        '-map', media.videoStreamIndex !== null ? `0:${media.videoStreamIndex}` : '0:v:0',
+        '-map', audioStreamIndex !== null ? `0:${audioStreamIndex}` : '0:a:0?',
+    ]
 }
 
 /**
@@ -185,12 +230,16 @@ export async function getPlaybackInfo(filePath: string): Promise<PlaybackInfo> {
     return (await getMediaDetails(filePath)).info
 }
 
+// Keyframes already looked up, per file, so seeking around the same place again costs nothing.
+const KEYFRAME_CACHE_FILES = 4
+const keyframeCache = new Map<string, Map<number, number | null>>()
+
 /** Timestamp (absolute, seconds) of the last video keyframe at or before `target`, or null. */
-function findKeyframeBefore(filePath: string, target: number): Promise<number | null> {
+function findKeyframeBefore(filePath: string, streamIndex: number | null, target: number): Promise<number | null> {
     return new Promise((resolve) => {
         // Packet flags are enough to spot keyframes, so nothing needs decoding.
         const proc = spawn(ffprobePath, [
-            '-v', 'error', '-select_streams', 'v:0',
+            '-v', 'error', '-select_streams', streamIndex !== null ? String(streamIndex) : 'v:0',
             '-show_entries', 'packet=pts_time,flags', '-of', 'csv=p=0',
             '-read_intervals', `${Math.max(0, target - 30)}%${target + 0.1}`,
             filePath,
@@ -217,9 +266,23 @@ function findKeyframeBefore(filePath: string, target: number): Promise<number | 
  */
 export async function resolveStreamStart(filePath: string, start: number): Promise<number> {
     const requested = Math.max(0, start)
-    const { info, startTime } = await getMediaDetails(filePath)
-    if (info.mode !== 'transcode' || !info.copyVideo || requested === 0) return requested
-    const keyframe = await findKeyframeBefore(filePath, startTime + requested)
+    const { info, startTime, videoStreamIndex } = await getMediaDetails(filePath)
+    // Applies whenever the video is copied, including a directly playable file that is being
+    // converted for the sake of an audio track the player can't decode.
+    if (!info.copyVideo || requested === 0) return requested
+
+    let known = keyframeCache.get(filePath)
+    if (!known) {
+        known = new Map()
+        keyframeCache.set(filePath, known)
+        while (keyframeCache.size > KEYFRAME_CACHE_FILES) keyframeCache.delete(keyframeCache.keys().next().value as string)
+    }
+    const key = Math.round(requested * 1000)
+    let keyframe = known.get(key)
+    if (keyframe === undefined) {
+        keyframe = await findKeyframeBefore(filePath, videoStreamIndex, startTime + requested)
+        known.set(key, keyframe)
+    }
     return keyframe === null ? requested : Math.max(0, keyframe - startTime)
 }
 
@@ -242,14 +305,16 @@ interface VideoArgOptions {
 
 /** Video arguments for re-encoding: `input` goes before `-i`, `output` after the stream maps. */
 export function buildVideoArgs(profile: EncoderProfile, media: MediaDetails, options: VideoArgOptions = {}): { input: string[], output: string[] } {
-    const hardware = profile.encoder !== 'libx264'
-    const scaleHeight = !hardware && media.height > SOFTWARE_MAX_HEIGHT ? SOFTWARE_MAX_HEIGHT : null
+    const scaleHeight = !isHardwareEncoder(profile.encoder) && media.height > SOFTWARE_MAX_HEIGHT ? SOFTWARE_MAX_HEIGHT : null
     // 10-bit sources lose shades in conversion to 8-bit, which shows as banding in dark scenes, so they
     // stay 10-bit where the encoder allows. HDR is tone-mapped down to 8-bit SDR either way.
     const tenBit = profile.tenBit && media.isHighBitDepth && !media.isHdr
-    const pixFmt = hardware ? (tenBit ? 'p010' : 'nv12') : 'yuv420p'
+    const pixFmt = encoderPixelFormat(profile.encoder, tenBit)
+    const device = encoderDeviceArgs(profile, true)
 
     const filters: string[] = []
+    // Only frames flagged as interlaced are touched, so progressive parts of mixed sources stay as they are.
+    if (media.interlaced) filters.push('bwdif=mode=send_frame:parity=auto:deint=interlaced')
     if (media.isHdr && profile.toneMapper === 'libplacebo') {
         filters.push(`libplacebo=${scaleHeight ? `w=-2:h=${scaleHeight}:` : ''}${LIBPLACEBO_TONEMAP}:format=${pixFmt}`)
     } else if (media.isHdr && profile.toneMapper === 'zscale') {
@@ -259,36 +324,12 @@ export function buildVideoArgs(profile: EncoderProfile, media: MediaDetails, opt
         if (scaleHeight) filters.push(`scale=-2:${scaleHeight}`)
         filters.push(`format=${pixFmt}`)
     }
-    if (hardware) filters.push('hwupload')
+    filters.push(...device.filters)
 
-    const input = hardware
-        // Decode on the GPU where the driver supports the codec; ffmpeg falls back to software otherwise.
-        // Decoded frames come back to system memory so the same filters work either way.
-        ? ['-init_hw_device', `vaapi=va:${profile.vaapiDevice}`, '-filter_hw_device', 'va', '-hwaccel', 'vaapi', '-hwaccel_device', 'va']
-        : []
-
-    // VAAPI drivers may pick a rate-control mode that ignores the quality setting (Intel's iHD picks
-    // ICQ and ends up below the source's bitrate), so constant-QP is requested explicitly.
-    const encoder = {
-        libx264: ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21'],
-        h264_vaapi: ['-c:v', 'h264_vaapi', '-rc_mode', 'CQP', '-qp', '21'],
-        // VP9 quantizer index, 0-255 (lower is better).
-        vp9_vaapi: ['-c:v', 'vp9_vaapi', '-rc_mode', 'CQP', '-global_quality', '60'],
-    }[profile.encoder]
-
-    const keyframes = options.segmentSeconds
-        ? [
-            '-force_key_frames', `expr:gte(t,n_forced*${options.segmentSeconds})`, '-g', '720',
-            ...(profile.encoder === 'libx264' ? ['-sc_threshold', '0'] : []),
-            // Segments from different runs end up side by side in the player (seeking back, and on
-            // Windows every restart). B-frames shift timestamps differently per run, which leaves
-            // holes where they meet, so HLS output has none.
-            ...(profile.encoder === 'vp9_vaapi' ? [] : ['-bf', '0']),
-        ]
-        // Short GOPs keep fragments small, so the first frame arrives quickly.
-        : ['-g', '48']
-
-    return { input, output: ['-vf', filters.join(','), ...encoder, ...keyframes] }
+    return {
+        input: device.input,
+        output: ['-vf', filters.join(','), ...encoderArgs(profile.encoder, scaleHeight ?? media.height, options.segmentSeconds)],
+    }
 }
 
 export const AUDIO_ARGS = ['-c:a', 'aac', '-ac', '2', '-b:a', '192k']

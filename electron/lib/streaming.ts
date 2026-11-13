@@ -1,8 +1,9 @@
 import { spawn, ChildProcess } from 'child_process'
 import { Readable } from 'stream'
 import { EncoderProfile, bundledFfmpegPath, describeProfile, getEncoderProfiles } from './encoders'
-import { AUDIO_ARGS, HWACCEL_FALLBACK_MESSAGES, MediaDetails, buildVideoArgs, getMediaDetails, profilesForFile, rememberWorkingProfile } from './media'
+import { AUDIO_ARGS, HWACCEL_FALLBACK_MESSAGES, MediaDetails, buildVideoArgs, getMediaDetails, profilesForFile, rememberWorkingProfile, streamMapArgs } from './media'
 import { handleHlsRequest, removeHlsFiles, stopHlsSessions } from './hls'
+import { handleFontRequest, removePrivateSubtitles } from './subtitles'
 
 // Progressive conversion: ffmpeg writes one fragmented MP4 to stdout, which is streamed to the
 // player. Used when the video stream is copied (only audio/container need converting), since copied
@@ -33,7 +34,7 @@ export function stopAllStreams() {
 /** Stop all conversions and remove their temp files; resolves once that is done (for quitting). */
 export async function shutdownStreams() {
     stopProgressiveStreams()
-    await removeHlsFiles()
+    await Promise.all([removeHlsFiles(), removePrivateSubtitles()])
 }
 
 /** Start encoder detection early so the first converted video doesn't wait for it. */
@@ -75,8 +76,7 @@ function buildArgs(profile: EncoderProfile, media: MediaDetails, { filePath, sta
         ...video.input,
         '-ss', seek.toFixed(3),
         '-i', filePath,
-        '-map', '0:v:0',
-        '-map', audioStreamIndex !== null ? `0:${audioStreamIndex}` : '0:a:0?',
+        ...streamMapArgs(media, audioStreamIndex),
         '-sn', '-dn',
         ...video.output,
         ...AUDIO_ARGS,
@@ -187,11 +187,12 @@ export async function createTranscodeResponse(request: StreamRequest): Promise<R
     return new Response('Stream failed', { status: 500 })
 }
 
-/** Handler for kino-stream://play/?path=...&start=...&audio=... and kino-stream://hls/... */
+/** Handler for kino-stream://play/?path=...&start=...&audio=..., kino-stream://hls/... and kino-stream://fonts/... */
 export async function handleStreamRequest(request: Request): Promise<Response> {
     try {
         const url = new URL(request.url)
         if (url.host === 'hls') return await handleHlsRequest(url)
+        if (url.host === 'fonts') return await handleFontRequest(url)
 
         const filePath = url.searchParams.get('path')
         if (!filePath) return new Response('Missing path', { status: 400 })

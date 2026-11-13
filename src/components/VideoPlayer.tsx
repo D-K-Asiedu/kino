@@ -1,11 +1,12 @@
 import {
     Play, Pause, Volume2, VolumeX, Maximize, Minimize,
     SkipBack, SkipForward, ChevronLeft, Gauge, MessageSquare, Languages,
-    History, RotateCcw, Settings, Check, Keyboard, PictureInPicture2, Type, X, Loader2
+    History, RotateCcw, Settings, Check, Keyboard, PictureInPicture2, Type, X, Loader2, Timer, Minus, Plus
 } from 'lucide-react'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js/light'
 import { PgsRenderer } from 'libpgs'
+import JASSUB from 'jassub'
 // The enum isn't exported at runtime, only its type
 import type { PgsRendererMode } from 'libpgs/dist/pgsRendererMode'
 import { Movie, VideoElementWithTracks, AudioTrack } from '../types'
@@ -22,7 +23,7 @@ interface VideoPlayerProps {
     startMode?: 'prompt' | 'resume' | 'restart'
 }
 
-type SettingsTab = 'main' | 'audio' | 'subtitles' | 'subtitleSize' | 'speed'
+type SettingsTab = 'main' | 'audio' | 'subtitles' | 'subtitleSize' | 'subtitleDelay' | 'speed'
 
 type SubtitleSize = 'small' | 'medium' | 'large' | 'xlarge'
 
@@ -44,6 +45,8 @@ const SHORTCUTS: { keys: string[]; label: string }[] = [
     { keys: ['M'], label: 'Mute' },
     { keys: ['F'], label: 'Fullscreen' },
     { keys: ['I'], label: 'Picture in Picture' },
+    { keys: ['G'], label: 'Subtitles earlier' },
+    { keys: ['H'], label: 'Subtitles later' },
     { keys: ['N'], label: 'Next video' },
     { keys: ['P'], label: 'Previous video' },
     { keys: ['?'], label: 'Show shortcuts' },
@@ -84,15 +87,54 @@ interface PlaybackInfo {
 const CONVERSION_ERROR = 'Kino couldn’t convert this video for playback.'
 
 interface ActiveSubtitle {
+    /** Id of the track in the subtitle list (see electron/lib/subtitles.ts). */
+    trackId: string
     /** Text subtitles, converted to WebVTT and shown through a <track>. */
     vtt?: string
+    /** Styled subtitles (ASS/SSA: fonts, colours, positioned signs), drawn over the video by libass. */
+    ass?: string
+    /** URLs of the fonts attached to the video, which styled subtitles are written for. */
+    fonts?: string[]
     /** PGS image subtitles (.sup), drawn onto a canvas over the video by libpgs. */
     pgs?: ArrayBuffer
     label: string
     language: string
 }
 
-const PGS_SUBTITLE_CODEC = 'hdmv_pgs_subtitle'
+/** A subtitle track the player offers: inside the video, or a subtitle file beside it. */
+interface SubtitleTrack {
+    id: string
+    label: string
+    language: string
+    codec: string
+    format: 'vtt' | 'ass' | 'pgs'
+    isForced: boolean
+    external: boolean
+    mode: 'showing' | 'hidden'
+}
+
+type SubtitlePayload =
+    | { format: 'vtt', text: string }
+    | { format: 'ass', text: string, fonts: string[] }
+    | { format: 'pgs', bytes: Uint8Array }
+
+const SUBTITLE_DELAY_STEP = 0.1
+
+const formatSubtitleDelay = (delay: number) => {
+    if (Math.abs(delay) < 0.05) return 'None'
+    return `${Math.abs(delay).toFixed(1)}s ${delay > 0 ? 'later' : 'earlier'}`
+}
+
+const CHANNEL_LAYOUTS: Record<number, string> = { 1: 'Mono', 2: 'Stereo', 6: '5.1', 7: '6.1', 8: '7.1' }
+
+const describeAudioTrack = (track: AudioTrack, position: number) => {
+    const name = `${track.label || `Track ${position + 1}`}${track.language && track.language !== 'und' ? ` (${track.language})` : ''}`
+    const details = [
+        track.channels ? CHANNEL_LAYOUTS[track.channels] ?? `${track.channels} ch` : null,
+        track.codec && track.codec !== 'unknown' ? track.codec.toUpperCase() : null,
+    ].filter(Boolean).join(' · ')
+    return { name, details }
+}
 
 const VTT_TIMESTAMP = /(?:(\d+):)?(\d{2}):(\d{2})\.(\d{3})/g
 
@@ -105,9 +147,12 @@ const formatVttTimestamp = (seconds: number) => {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`
 }
 
-/** Shift every cue earlier by offsetSeconds, so cues line up with a stream that starts mid-file. */
+/**
+ * Shift every cue earlier by offsetSeconds (later when negative), so cues line up with a stream that
+ * starts mid-file, or with a subtitle delay the viewer has set.
+ */
 const shiftVttCues = (vtt: string, offsetSeconds: number) => {
-    if (offsetSeconds <= 0) return vtt
+    if (offsetSeconds === 0) return vtt
     return vtt
         .split('\n')
         .map(line => {
@@ -128,6 +173,12 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
     const lastUiTimeRef = useRef(0)
     const subtitleObjectUrlRef = useRef<string | null>(null)
     const pgsRendererRef = useRef<PgsRenderer | null>(null)
+    const assRendererRef = useRef<JASSUB | null>(null)
+    // For callbacks that outlive a render (the player stays mounted across episodes).
+    const moviePathRef = useRef(movie.file_path)
+    moviePathRef.current = movie.file_path
+    // Seconds the subtitles are shown later (negative: earlier) than their own timing says.
+    const subtitleDelayRef = useRef(0)
     const pgsCanvasRef = useRef<HTMLCanvasElement>(null)
     const pendingSeekTimeRef = useRef<number | null>(null)
     const isScrubbingRef = useRef(false)
@@ -178,7 +229,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         return Number.isFinite(parsed) && parsed > 0 ? parsed : 1
     })
     const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([])
-    const [textTracks, setTextTracks] = useState<TextTrack[]>([])
+    const [textTracks, setTextTracks] = useState<SubtitleTrack[]>([])
+    const [subtitleDelay, setSubtitleDelay] = useState(0)
     const [loadingSubtitleIndex, setLoadingSubtitleIndex] = useState<number | null>(null)
     const [playbackInfo, setPlaybackInfo] = useState<PlaybackInfo | null>(null)
     const [videoSrc, setVideoSrc] = useState<string | undefined>(undefined)
@@ -219,6 +271,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         }
         pgsRendererRef.current?.dispose()
         pgsRendererRef.current = null
+        // Stops the renderer's worker and removes the canvas it added after the video
+        void assRendererRef.current?.destroy().catch(() => undefined)
+        assRendererRef.current = null
         // The canvas belongs to the player, so dispose() leaves the last subtitle drawn on it
         const canvas = pgsCanvasRef.current
         canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
@@ -262,7 +317,26 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         releaseSubtitleRendering()
         if (!subtitle) return
 
-        const offset = isProgressiveRef.current ? streamOffsetRef.current : 0
+        // Subtitle time = the element's time + this. Converted streams start mid-file (their clock
+        // starts at 0 there), and a delay set by the viewer moves the subtitles later.
+        const offset = (isProgressiveRef.current ? streamOffsetRef.current : 0) - subtitleDelayRef.current
+        if (subtitle.ass) {
+            try {
+                const renderer = new JASSUB({
+                    video,
+                    subContent: subtitle.ass,
+                    fonts: subtitle.fonts ?? [],
+                    timeOffset: offset,
+                })
+                assRendererRef.current = renderer
+                renderer.ready.catch(err => {
+                    if (assRendererRef.current === renderer) void showAssAsPlainText(subtitle, err)
+                })
+            } catch (err) {
+                void showAssAsPlainText(subtitle, err)
+            }
+            return
+        }
         if (subtitle.pgs) {
             if (!pgsCanvasRef.current) return
             // Main-thread mode needs no worker script, which a packaged app loading from file:// can't always start.
@@ -283,7 +357,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         const trackEl = document.createElement('track')
         trackEl.kind = 'subtitles'
         trackEl.label = subtitle.label
-        trackEl.srclang = subtitle.language
+        trackEl.srclang = subtitle.language === 'und' ? '' : subtitle.language
         trackEl.src = url
         trackEl.default = true
         video.appendChild(trackEl)
@@ -294,7 +368,33 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 trackEl.track.mode = 'showing'
             }
         }, 100)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [releaseSubtitleRendering])
+
+    /** The styled renderer couldn't start (no worker or WebAssembly): show the same track as plain text. */
+    const showAssAsPlainText = async (subtitle: ActiveSubtitle, reason: unknown) => {
+        console.error('Styled subtitles unavailable, showing them as plain text:', reason)
+        try {
+            const payload: SubtitlePayload = await window.ipcRenderer.invoke('media:get-subtitle', moviePathRef.current, subtitle.trackId, true)
+            if (activeSubtitleRef.current !== subtitle || payload.format !== 'vtt') return
+            activeSubtitleRef.current = { trackId: subtitle.trackId, vtt: payload.text, label: subtitle.label, language: subtitle.language }
+            attachActiveSubtitle()
+        } catch (err) {
+            console.error('Failed to load subtitle as plain text:', err)
+        }
+    }
+
+    /** Show subtitles `delay` seconds later than their own timing (earlier when negative). */
+    const changeSubtitleDelay = (delay: number) => {
+        const rounded = Math.round(delay * 10) / 10
+        subtitleDelayRef.current = rounded
+        setSubtitleDelay(rounded)
+        const offset = (isProgressiveRef.current ? streamOffsetRef.current : 0) - rounded
+        // The image and styled renderers take a new offset as they run; text cues are rebuilt.
+        if (assRendererRef.current) assRendererRef.current.timeOffset = offset
+        else if (pgsRendererRef.current) pgsRendererRef.current.timeOffset = offset
+        else if (activeSubtitleRef.current) attachActiveSubtitle()
+    }
 
     /** Whether the user expects playback to be running (true while a paused-looking stream is loading). */
     const isPlaybackIntended = useCallback(() => {
@@ -352,6 +452,9 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
         const hls = new Hls({
             startPosition: time,
+            // Converted segments stay on disk for the session, so the player needn't hold everything
+            // it has played in memory as well; seeking back further than this reloads from disk.
+            backBufferLength: 60,
             // Segments are produced on demand, so a segment after a seek can take a few seconds to arrive.
             fragLoadPolicy: {
                 default: {
@@ -625,6 +728,8 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         subtitleRequestRef.current++
         setLoadingSubtitleIndex(null)
         activeSubtitleRef.current = null
+        subtitleDelayRef.current = 0
+        setSubtitleDelay(0)
         tracksLoadedForMovieRef.current = null
         releaseSubtitleRendering()
         if (videoRef.current) {
@@ -699,11 +804,14 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         const time = getAbsoluteTime()
         const prev = lastUiTimeRef.current
         const nearEnd = duration > 0 && duration - time < 0.25
-        if (Math.abs(time - prev) >= 0.25 || time === 0 || nearEnd) {
+        // Each update re-renders the player. The progress bar needs that 4 times a second while it's
+        // visible; with the controls hidden once a second is enough (it drives the Up Next prompt).
+        const step = showControls ? 0.25 : 1
+        if (Math.abs(time - prev) >= step || time === 0 || nearEnd) {
             lastUiTimeRef.current = time
             setCurrentTime(time)
         }
-    }, [duration, getAbsoluteTime])
+    }, [duration, getAbsoluteTime, showControls])
 
     // Video Actions
     const togglePlay = () => {
@@ -867,12 +975,16 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
             // Set Audio Tracks
             if (metadata.audioTracks && metadata.audioTracks.length > 0) {
-                const tracks = metadata.audioTracks.map((t: any) => ({
+                const tracks: AudioTrack[] = metadata.audioTracks.map((t: any, i: number) => ({
                     id: t.index.toString(),
                     kind: 'main',
                     label: t.label,
                     language: t.language,
-                    enabled: t.index === 1 // Default to first track usually
+                    codec: t.codec,
+                    channels: t.channels,
+                    supported: t.supported,
+                    // Playback starts on the first audio track, directly or converted
+                    enabled: i === 0
                 }))
                 setAudioTracks(tracks)
                 if (storedAudioLang) {
@@ -887,17 +999,18 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
             // Set Subtitle Tracks
             if (metadata.subtitleTracks && metadata.subtitleTracks.length > 0) {
-                const tracks = metadata.subtitleTracks.map((t: any) => ({
-                    id: t.index.toString(),
-                    kind: 'subtitles',
+                const tracks: SubtitleTrack[] = metadata.subtitleTracks.map((t: any) => ({
+                    id: String(t.id),
                     label: t.label,
                     language: t.language,
                     codec: t.codec,
+                    format: t.format,
                     isForced: t.isForced,
-                    mode: 'hidden' as TextTrackMode
+                    external: t.external,
+                    mode: 'hidden'
                 }))
                 // Add to state but don't add to video yet until selected
-                setTextTracks(tracks as any)
+                setTextTracks(tracks)
                 if (storedSubtitleLang) {
                     const matches = (track: { language: string; label: string }) =>
                         (track.language && track.language === storedSubtitleLang) || (track.label && track.label === storedSubtitleLang)
@@ -939,22 +1052,36 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             const videoEl = videoRef.current as unknown as VideoElementWithTracks
             const wasPlaying = !videoRef.current.paused
             const currentTime = videoRef.current.currentTime
+            const trackList = trackSource ?? audioTracks
+            const track = trackList[index]
+            if (!track) return
+
+            setAudioTracks(trackList.map((t, i) => ({ ...t, enabled: i === index })))
+            const audioIdentifier = track.language || track.label
+            if (audioIdentifier) {
+                setStoredValue(STORAGE_KEYS.audio, audioIdentifier)
+            }
+            setSettingsTab('main')
+            if (track.enabled) return
+
+            if (track.supported === false) {
+                // Chromium can't decode this track (AC3, DTS, ...) and would play silence. Keep the
+                // picture as it is and convert just the audio, from the current position.
+                const position = getAbsoluteTime()
+                const play = isPlaybackIntended()
+                isProgressiveRef.current = true
+                audioStreamIndexRef.current = Number(track.id)
+                setPlaybackInfo(info => info && {
+                    ...info, mode: 'transcode', copyVideo: true, hls: false,
+                    reason: `Needs converting: audio codec ${track.codec ?? 'unknown'}`,
+                })
+                void startStreamAt(position, play)
+                return
+            }
 
             if (videoEl.audioTracks) {
                 for (let i = 0; i < videoEl.audioTracks.length; i++) {
                     videoEl.audioTracks[i].enabled = i === index
-                }
-
-                // Update state
-                const tracks: AudioTrack[] = []
-                for (let i = 0; i < videoEl.audioTracks.length; i++) {
-                    tracks.push(videoEl.audioTracks[i])
-                }
-                setAudioTracks(tracks)
-                const selectedTrack = videoEl.audioTracks[index]
-                const audioIdentifier = selectedTrack?.language || selectedTrack?.label
-                if (audioIdentifier) {
-                    setStoredValue(STORAGE_KEYS.audio, audioIdentifier)
                 }
             }
 
@@ -984,7 +1111,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
         setSettingsTab('main')
     }
 
-    const toggleSubtitleTrack = async (index: number, trackSource?: TextTrack[]) => {
+    const toggleSubtitleTrack = async (index: number, trackSource?: SubtitleTrack[]) => {
         const trackList = trackSource ?? textTracks
         const track = trackList[index]
         if (!track) return
@@ -997,23 +1124,22 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
 
         // Show the choice right away: the first extraction from a file can take a few seconds.
         const request = ++subtitleRequestRef.current
-        setTextTracks(trackList.map((t, i) => ({ ...t, mode: i === index ? 'showing' : 'hidden' })) as any)
+        setTextTracks(trackList.map((t, i) => ({ ...t, mode: i === index ? 'showing' : 'hidden' })))
         setLoadingSubtitleIndex(index)
         setSettingsTab('main')
 
         try {
-            const streamIndex = parseInt((track as any).id)
-            let content: Pick<ActiveSubtitle, 'vtt' | 'pgs'>
-            if ((track as any).codec === PGS_SUBTITLE_CODEC) {
-                const bytes: Uint8Array = await window.ipcRenderer.invoke('media:extract-pgs-subtitle', movie.file_path, streamIndex)
-                content = { pgs: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer }
-            } else {
-                content = { vtt: await window.ipcRenderer.invoke('media:extract-subtitle-content', movie.file_path, streamIndex) }
-            }
+            const payload: SubtitlePayload = await window.ipcRenderer.invoke('media:get-subtitle', movie.file_path, track.id)
+            const content: Pick<ActiveSubtitle, 'vtt' | 'ass' | 'fonts' | 'pgs'> =
+                payload.format === 'pgs'
+                    ? { pgs: payload.bytes.buffer.slice(payload.bytes.byteOffset, payload.bytes.byteOffset + payload.bytes.byteLength) as ArrayBuffer }
+                    : payload.format === 'ass'
+                        ? { ass: payload.text, fonts: payload.fonts }
+                        : { vtt: payload.text }
             // A later choice (or Off) replaced this one while it loaded
             if (request !== subtitleRequestRef.current) return
 
-            activeSubtitleRef.current = { ...content, label: track.label, language: track.language }
+            activeSubtitleRef.current = { ...content, trackId: track.id, label: track.label, language: track.language }
             attachActiveSubtitle()
             const subtitleIdentifier = track.language || track.label
             if (subtitleIdentifier) {
@@ -1023,7 +1149,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             if (request !== subtitleRequestRef.current) return
             console.error('Failed to load subtitle:', err)
             // Put the menu back on what's actually showing
-            setTextTracks(trackList as any)
+            setTextTracks(trackList)
         } finally {
             if (request === subtitleRequestRef.current) setLoadingSubtitleIndex(null)
         }
@@ -1037,8 +1163,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
             const existingTracks = videoRef.current.querySelectorAll('track')
             existingTracks.forEach(t => t.remove())
 
-            const newTracks = textTracks.map(t => ({ ...t, mode: 'hidden' }))
-            setTextTracks(newTracks as any)
+            setTextTracks(textTracks.map(t => ({ ...t, mode: 'hidden' })))
         }
         releaseSubtitleRendering()
         removeStoredValue(STORAGE_KEYS.subtitle)
@@ -1187,6 +1312,12 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                 case 'i':
                     togglePictureInPicture()
                     break
+                case 'g':
+                    changeSubtitleDelay(subtitleDelayRef.current - SUBTITLE_DELAY_STEP)
+                    break
+                case 'h':
+                    changeSubtitleDelay(subtitleDelayRef.current + SUBTITLE_DELAY_STEP)
+                    break
                 case 'escape':
                     if (showShortcuts) {
                         setShowShortcuts(false)
@@ -1267,6 +1398,19 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                             </div>
                         </button>
                         <button
+                            onClick={() => setSettingsTab('subtitleDelay')}
+                            className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
+                        >
+                            <div className="flex items-center gap-2">
+                                <Timer className="w-4 h-4" />
+                                <span>Subtitle delay</span>
+                            </div>
+                            <div className="flex items-center gap-1 text-white/50 text-xs">
+                                <span>{formatSubtitleDelay(subtitleDelay)}</span>
+                                <ChevronLeft className="w-4 h-4 rotate-180" />
+                            </div>
+                        </button>
+                        <button
                             onClick={() => setSettingsTab('speed')}
                             className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
                         >
@@ -1313,8 +1457,13 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                                 onClick={() => toggleAudioTrack(i)}
                                 className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
                             >
-                                <span>{track.label || `Track ${i + 1}`} {track.language && `(${track.language})`}</span>
-                                {track.enabled && <Check className="w-4 h-4 text-primary" />}
+                                <span className="flex flex-col items-start text-left">
+                                    <span>{describeAudioTrack(track, i).name}</span>
+                                    {describeAudioTrack(track, i).details && (
+                                        <span className="text-xs text-white/50">{describeAudioTrack(track, i).details}</span>
+                                    )}
+                                </span>
+                                {track.enabled && <Check className="w-4 h-4 shrink-0 text-primary" />}
                             </button>
                         ))}
                     </div>
@@ -1342,7 +1491,14 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                                 onClick={() => toggleSubtitleTrack(i)}
                                 className="flex items-center justify-between px-3 py-2 rounded hover:bg-white/10 text-sm text-white transition-colors"
                             >
-                                <span>{track.label || `Track ${i + 1}`} {track.language && `(${track.language})`}</span>
+                                <span className="flex flex-col items-start text-left">
+                                    <span>{track.label || `Track ${i + 1}`}{track.language && track.language !== 'und' ? ` (${track.language})` : ''}</span>
+                                    {(track.external || track.format !== 'vtt') && (
+                                        <span className="text-xs text-white/50">
+                                            {[track.external && 'Subtitle file', track.format === 'ass' && 'Styled', track.format === 'pgs' && 'Image'].filter(Boolean).join(' · ')}
+                                        </span>
+                                    )}
+                                </span>
                                 {track.mode === 'showing' && (loadingSubtitleIndex === i
                                     ? <Loader2 className="w-4 h-4 animate-spin text-white/60" />
                                     : <Check className="w-4 h-4 text-primary" />)}
@@ -1370,6 +1526,42 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                                 {playbackRate === rate && <Check className="w-4 h-4 text-primary" />}
                             </button>
                         ))}
+                    </div>
+                )
+            case 'subtitleDelay':
+                return (
+                    <div className="flex flex-col gap-1 min-w-[240px]">
+                        <button
+                            onClick={() => setSettingsTab('main')}
+                            className="flex items-center gap-2 px-3 py-2 mb-2 rounded hover:bg-white/10 text-sm text-white/70 hover:text-white transition-colors border-b border-white/10"
+                        >
+                            <ChevronLeft className="w-4 h-4" />
+                            <span>Subtitle delay</span>
+                        </button>
+                        <div className="flex items-center justify-between gap-2 px-3 py-2">
+                            <button
+                                onClick={() => changeSubtitleDelay(subtitleDelay - SUBTITLE_DELAY_STEP)}
+                                className="p-2 rounded hover:bg-white/10 text-white transition-colors"
+                                aria-label="Show subtitles earlier"
+                            >
+                                <Minus className="w-4 h-4" />
+                            </button>
+                            <span className="text-sm text-white tabular-nums">{formatSubtitleDelay(subtitleDelay)}</span>
+                            <button
+                                onClick={() => changeSubtitleDelay(subtitleDelay + SUBTITLE_DELAY_STEP)}
+                                className="p-2 rounded hover:bg-white/10 text-white transition-colors"
+                                aria-label="Show subtitles later"
+                            >
+                                <Plus className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <button
+                            onClick={() => changeSubtitleDelay(0)}
+                            disabled={subtitleDelay === 0}
+                            className="px-3 py-2 rounded hover:bg-white/10 text-sm text-white/70 hover:text-white disabled:opacity-40 disabled:hover:bg-transparent transition-colors text-left"
+                        >
+                            Reset
+                        </button>
                     </div>
                 )
             case 'subtitleSize':

@@ -18,7 +18,11 @@ let pendingLibraryUpdate = false
 let pendingPlaylistUpdate = false
 let metadataUpdatePending = false
 
-const VIDEO_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.wmv']
+// Anything ffmpeg can read is playable: what Chromium can't decode is converted while playing.
+const VIDEO_EXTENSIONS = [
+    '.mkv', '.mp4', '.m4v', '.mov', '.webm', '.avi', '.wmv', '.asf', '.flv', '.f4v',
+    '.ts', '.m2ts', '.mts', '.mpg', '.mpeg', '.vob', '.ogv', '.ogm', '.3gp', '.3g2', '.divx', '.rm', '.rmvb', '.mxf',
+]
 
 export function startWatcher() {
     const paths = db.getWatchPaths().map((row: any) => row.path)

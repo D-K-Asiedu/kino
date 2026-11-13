@@ -4,7 +4,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { EncoderProfile, describeProfile, getEncoderProfiles } from './encoders'
-import { AUDIO_ARGS, HWACCEL_FALLBACK_MESSAGES, MediaDetails, buildVideoArgs, getMediaDetails, profilesForFile, rememberWorkingProfile } from './media'
+import { AUDIO_ARGS, HWACCEL_FALLBACK_MESSAGES, MediaDetails, buildVideoArgs, getMediaDetails, profilesForFile, rememberWorkingProfile, streamMapArgs } from './media'
 
 // On-demand HLS for re-encoded video. The playlist lists every segment of the movie up front, so the
 // player can seek anywhere; ffmpeg is (re)started at whichever segment is requested and writes
@@ -220,8 +220,7 @@ class HlsSession {
             ...video.input,
             '-ss', offset.toFixed(3),
             '-i', this.source.filePath,
-            '-map', '0:v:0',
-            '-map', this.source.audioStreamIndex !== null ? `0:${this.source.audioStreamIndex}` : '0:a:0?',
+            ...streamMapArgs(this.media, this.source.audioStreamIndex),
             '-sn', '-dn',
             ...video.output,
             ...AUDIO_ARGS,

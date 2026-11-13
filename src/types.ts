@@ -41,6 +41,10 @@ export interface AudioTrack {
     label: string
     language: string
     enabled: boolean
+    codec?: string
+    channels?: number
+    /** False when the player can't decode the track itself and it has to be converted. */
+    supported?: boolean
 }
 
 export interface AudioTrackList extends EventTarget {

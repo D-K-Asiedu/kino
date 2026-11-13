@@ -7,6 +7,7 @@ import { registerIPC } from './lib/ipc'
 import { startWatcher } from './lib/watcher'
 import { generateDefaultPlaylists } from './lib/playlists'
 import { handleStreamRequest, shutdownStreams, warmUpEncoders } from './lib/streaming'
+import { pruneSubtitleCache } from './lib/subtitles'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -109,6 +110,13 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     win?.webContents.send('main-process-message', (new Date).toLocaleString())
   })
+  // Background housekeeping waits until the window is up, so it doesn't slow the launch.
+  win.webContents.once('did-finish-load', () => {
+    setTimeout(() => {
+      warmUpEncoders()
+      void pruneSubtitleCache()
+    }, 1500)
+  })
 
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
@@ -160,7 +168,8 @@ app.whenReady().then(async () => {
         const getMimeType = (filename: string) => {
           const ext = path.extname(filename).toLowerCase()
           switch (ext) {
-            case '.mp4': return 'video/mp4'
+            case '.mp4':
+            case '.m4v': return 'video/mp4'
             case '.mkv': return 'video/x-matroska'
             case '.webm': return 'video/webm'
             case '.avi': return 'video/x-msvideo'
@@ -174,8 +183,12 @@ app.whenReady().then(async () => {
 
         if (range) {
           const parts = range.replace(/bytes=/, "").split("-")
-          const start = parseInt(parts[0], 10)
-          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1
+          const start = parseInt(parts[0], 10) || 0
+          // Players may ask past the end of the file; serve what exists.
+          const end = Math.min(parts[1] ? parseInt(parts[1], 10) : fileSize - 1, fileSize - 1)
+          if (start >= fileSize || end < start) {
+            return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${fileSize}` } })
+          }
           const chunksize = (end - start) + 1
 
           const stream = fs.createReadStream(filePath, { start, end })
@@ -205,7 +218,6 @@ app.whenReady().then(async () => {
       }
     })
     protocol.handle('kino-stream', handleStreamRequest)
-    warmUpEncoders()
     writeLog('INFO', 'Media protocol handler registered')
 
     try {
