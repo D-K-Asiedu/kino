@@ -4,6 +4,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { EncoderProfile, describeProfile, getEncoderProfiles } from './encoders'
+import { isProcessAlive } from './processes'
 import { AUDIO_ARGS, HWACCEL_FALLBACK_MESSAGES, MediaDetails, buildVideoArgs, getMediaDetails, profilesForFile, rememberWorkingProfile, streamMapArgs } from './media'
 
 // On-demand HLS for re-encoded video. The playlist lists every segment of the movie up front, so the
@@ -61,15 +62,6 @@ let staleDirsCleaned = false
 
 function sourceToken(filePath: string, audioStreamIndex: number | null) {
     return crypto.createHash('sha1').update(`${filePath}\0${audioStreamIndex ?? ''}`).digest('hex').slice(0, 16)
-}
-
-function isProcessAlive(pid: number) {
-    try {
-        process.kill(pid, 0)
-        return true
-    } catch (err) {
-        return (err as NodeJS.ErrnoException).code === 'EPERM'
-    }
 }
 
 /** Remove segment folders left behind by Kino processes that didn't shut down cleanly. */

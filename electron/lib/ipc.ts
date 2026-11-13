@@ -1,6 +1,7 @@
-import { ipcMain, dialog } from 'electron'
+import { ipcMain, dialog, app } from 'electron'
 import * as db from './database'
-import { updateWatcher, triggerMetadataProcessing, pruneMoviesOutsideWatchPaths } from './watcher'
+import path from 'path'
+import { updateWatcher, triggerMetadataProcessing, pruneMoviesOutsideWatchPaths, addLibraryFile } from './watcher'
 import {
     getSecureStatus,
     setSecurePassword,
@@ -13,7 +14,8 @@ import {
     prepareSecurePlayback,
     releaseSecurePlayback,
     deleteSecureItem,
-    getSecureThumbnail
+    getSecureThumbnail,
+    restoreSecureItem
 } from './secure'
 import { BrowserWindow } from 'electron'
 
@@ -212,6 +214,22 @@ export function registerIPC() {
     ipcMain.handle('secure:delete-item', async (_, itemId: number) => {
         await deleteSecureItem(itemId)
         return { ok: true }
+    })
+    ipcMain.handle('secure:restore-item', async (event, itemId: number) => {
+        const result = await restoreSecureItem(itemId, async (originalName) => {
+            const libraryFolder = (db.getWatchPaths() as { path: string }[])[0]?.path
+            const options: Electron.SaveDialogOptions = {
+                title: 'Restore video',
+                buttonLabel: 'Restore',
+                defaultPath: path.join(libraryFolder ?? app.getPath('videos'), originalName),
+            }
+            const win = BrowserWindow.fromWebContents(event.sender)
+            const choice = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options)
+            return choice.canceled ? null : choice.filePath ?? null
+        })
+        if (!result) return { canceled: true }
+        const inLibrary = addLibraryFile(result.filePath)
+        return { canceled: false, filePath: result.filePath, inLibrary }
     })
     ipcMain.handle('secure:get-thumbnail', async (_, itemId: number) => {
         const path = await getSecureThumbnail(itemId)

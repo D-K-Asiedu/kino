@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Lock, Unlock, Play, Trash2, EyeOff } from 'lucide-react'
+import { Lock, Unlock, Play, Trash2, EyeOff, ArchiveRestore, Loader2 } from 'lucide-react'
 import { SecureItem, Movie } from '../types'
 import { VideoPlayer } from '../components/VideoPlayer'
 import { Poster } from '../components/Poster'
@@ -18,6 +18,7 @@ export function SecureFolder() {
     const [activeTempPath, setActiveTempPath] = useState<string | null>(null)
     const activeTempPathRef = useRef<string | null>(null)
     const [thumbs, setThumbs] = useState<Record<number, string>>({})
+    const [restoringIds, setRestoringIds] = useState<Set<number>>(new Set())
 
     const refreshStatus = async () => {
         const status = await window.ipcRenderer.invoke('secure:status')
@@ -168,6 +169,39 @@ export function SecureFolder() {
         toast(`Deleted “${item.title}”`)
     }
 
+    const handleRestore = async (item: SecureItem) => {
+        const ok = await confirm({
+            title: `Restore “${item.title}”?`,
+            message: 'The video will be decrypted and saved as a normal file in a folder you choose, then removed from the Secure Folder.',
+            confirmLabel: 'Choose location',
+        })
+        if (!ok) return
+        setRestoringIds((prev) => new Set(prev).add(item.id))
+        try {
+            const result = await window.ipcRenderer.invoke('secure:restore-item', item.id)
+            if (result?.canceled) return
+            if (result.inLibrary) {
+                toast(`Restored “${item.title}” to your library`, 'success')
+            } else {
+                toast(`Saved “${item.title}” to ${result.filePath}. That folder isn’t in your library, so it won’t show up there.`, 'info')
+            }
+            setThumbs((prev) => {
+                const next = { ...prev }
+                delete next[item.id]
+                return next
+            })
+            fetchItems().catch(() => undefined)
+        } catch (err: any) {
+            toast(cleanIpcError(err) || 'Restore failed.', 'error')
+        } finally {
+            setRestoringIds((prev) => {
+                const next = new Set(prev)
+                next.delete(item.id)
+                return next
+            })
+        }
+    }
+
     const heroNote = useMemo(() => {
         if (!hasPassword) return 'Create a private space for videos you want hidden and encrypted.'
         if (!isUnlocked) return 'Unlock to access your secure library.'
@@ -311,6 +345,8 @@ export function SecureFolder() {
                                         posterPath={thumbs[item.id] ?? null}
                                         onPlay={handlePlay}
                                         onDelete={handleDelete}
+                                        onRestore={handleRestore}
+                                        restoring={restoringIds.has(item.id)}
                                         requestThumbnail={requestThumbnail}
                                         isUnlocked={isUnlocked}
                                     />
@@ -342,6 +378,8 @@ function SecureItemCard({
     posterPath,
     onPlay,
     onDelete,
+    onRestore,
+    restoring,
     requestThumbnail,
     isUnlocked,
 }: {
@@ -349,6 +387,8 @@ function SecureItemCard({
     posterPath: string | null
     onPlay: (item: SecureItem) => void
     onDelete: (item: SecureItem) => void
+    onRestore: (item: SecureItem) => void
+    restoring: boolean
     requestThumbnail: (itemId: number) => Promise<string | null>
     isUnlocked: boolean
 }) {
@@ -400,6 +440,12 @@ function SecureItemCard({
                     onLoad={() => setLoadingThumb(false)}
                     onError={() => setLoadingThumb(false)}
                 />
+                {restoring && (
+                    <div className="absolute inset-0 z-20 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center gap-2 text-white">
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        <span className="text-xs font-medium">Restoring…</span>
+                    </div>
+                )}
                 <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-end p-4">
                     <div className="w-full flex items-center justify-between">
                         <button
@@ -409,13 +455,22 @@ function SecureItemCard({
                         >
                             <Play className="w-4 h-4 fill-current" />
                         </button>
-                        <button
-                            onClick={() => onDelete(item)}
-                            className="p-2 bg-white/10 hover:bg-red-500 text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
-                            title="Delete"
-                        >
-                            <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => onRestore(item)}
+                                className="p-2 bg-white/10 hover:bg-primary text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
+                                title="Restore to a folder"
+                            >
+                                <ArchiveRestore className="w-4 h-4" />
+                            </button>
+                            <button
+                                onClick={() => onDelete(item)}
+                                className="p-2 bg-white/10 hover:bg-red-500 text-white rounded-full backdrop-blur-sm transition-colors shadow-lg"
+                                title="Delete"
+                            >
+                                <Trash2 className="w-4 h-4" />
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -425,4 +480,10 @@ function SecureItemCard({
             </div>
         </div>
     )
+}
+
+/** ipcRenderer.invoke wraps main-process errors as "Error invoking remote method '…': Error: <message>". */
+function cleanIpcError(err: any): string {
+    const message = String(err?.message ?? '')
+    return message.replace(/^Error invoking remote method '[^']*': (?:Error: )?/, '')
 }

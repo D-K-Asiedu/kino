@@ -5,9 +5,13 @@ import { app } from 'electron'
 import { pipeline } from 'stream/promises'
 import * as db from './database'
 import { generateThumbnailToPath } from './scraper'
+import { isProcessAlive } from './processes'
 
 const VAULT_DIR = () => path.join(app.getPath('userData'), 'secure-vault')
-const CACHE_DIR = () => path.join(app.getPath('temp'), 'kino-secure-cache')
+const CACHE_ROOT = () => path.join(app.getPath('temp'), 'kino-secure-cache')
+// Each Kino process decrypts into its own folder, so cleaning up never touches files another
+// running copy is playing.
+const CACHE_DIR = () => path.join(CACHE_ROOT(), String(process.pid))
 const THUMB_VAULT_DIR = () => path.join(VAULT_DIR(), 'thumbnails')
 const LOG_PATH = () => path.join(app.getPath('userData'), 'kino-debug.log')
 
@@ -96,7 +100,12 @@ async function encryptFile(sourcePath: string, destPath: string, key: Buffer) {
   await fs.promises.appendFile(destPath, tag)
 }
 
-async function decryptFile(sourcePath: string, destPath: string, key: Buffer) {
+async function decryptFile(
+  sourcePath: string,
+  destPath: string,
+  key: Buffer,
+  options: { signal?: AbortSignal; exclusive?: boolean } = {}
+) {
   ensureVaultDirs()
   const stats = await fs.promises.stat(sourcePath)
   if (stats.size <= HEADER_LENGTH + TAG_LENGTH) {
@@ -134,7 +143,8 @@ async function decryptFile(sourcePath: string, destPath: string, key: Buffer) {
   await pipeline(
     fs.createReadStream(sourcePath, { start: HEADER_LENGTH, end: tagPos - 1 }),
     decipher,
-    fs.createWriteStream(destPath)
+    fs.createWriteStream(destPath, { flags: options.exclusive ? 'wx' : 'w' }),
+    { signal: options.signal }
   )
 }
 
@@ -213,8 +223,31 @@ export async function lockSecure() {
   logSecure('Locked and cache cleared')
 }
 
+/** Lock the vault and delete every decrypted file this process made. Called on quit. */
+export async function shutdownSecure() {
+  await cancelSecureRestores()
+  await lockSecure()
+  // The player or ffmpeg may still be letting go of a file; Windows can't delete files held open.
+  await fs.promises.rm(CACHE_DIR(), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => undefined)
+}
+
+/**
+ * Delete decrypted files left by Kino runs that didn't quit cleanly (crash, force-kill, power loss),
+ * and by versions that kept them loose in the cache folder.
+ */
+export async function removeStaleSecureCache() {
+  const root = CACHE_ROOT()
+  const names = await fs.promises.readdir(root).catch(() => [] as string[])
+  const stale = names.filter(name => name !== String(process.pid) && !(/^\d+$/.test(name) && isProcessAlive(Number(name))))
+  await Promise.all(stale.map(name =>
+    fs.promises.rm(path.join(root, name), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined)
+  ))
+  if (stale.length > 0) logSecure(`Removed ${stale.length} decrypted leftovers from earlier runs`)
+}
+
 export async function resetSecure() {
   logSecure('Reset secure folder')
+  await cancelSecureRestores()
   await lockSecure()
   db.deleteAllSecureItems()
   db.removeSetting(SETTINGS_KEYS.authSalt)
@@ -362,14 +395,128 @@ export async function deleteSecureItem(itemId: number) {
   requireUnlocked()
   const item = db.getSecureItemById(itemId)
   if (!item) return
+  await removeFromVault(item)
+}
 
-  await deletePlaybackCacheForItem(itemId)
+async function removeFromVault(item: any) {
+  await deletePlaybackCacheForItem(item.id)
   await fs.promises.unlink(item.encrypted_path).catch(() => undefined)
   if (item.poster_path) {
     await fs.promises.unlink(item.poster_path).catch(() => undefined)
   }
-  db.deleteSecureItem(itemId)
-  await deleteCachedThumbnail(itemId)
+  db.deleteSecureItem(item.id)
+  await deleteCachedThumbnail(item.id)
+}
+
+type RestoreTask = { controller: AbortController; done: Promise<unknown> }
+const restoresInFlight = new Map<number, RestoreTask>()
+// Leave room for the filesystem's own bookkeeping so a restore can't fill the disk to the last byte.
+const RESTORE_SPACE_MARGIN = 64 * 1024 * 1024
+
+/**
+ * Decrypt a vault item back to a normal file, then remove it from the vault.
+ * The vault copy is only deleted once the decrypted file is complete, verified and in place.
+ * Returns null when the user cancels the location prompt.
+ */
+export async function restoreSecureItem(
+  itemId: number,
+  chooseDestination: (originalName: string) => Promise<string | null>
+) {
+  requireUnlocked()
+  if (restoresInFlight.has(itemId)) throw new Error('This video is already being restored.')
+  const item = db.getSecureItemById(itemId)
+  if (!item) throw new Error('Secure item not found')
+
+  const controller = new AbortController()
+  const task = runRestore(item, chooseDestination, controller.signal)
+  restoresInFlight.set(itemId, { controller, done: task.catch(() => undefined) })
+  try {
+    return await task
+  } finally {
+    restoresInFlight.delete(itemId)
+  }
+}
+
+async function runRestore(
+  item: any,
+  chooseDestination: (originalName: string) => Promise<string | null>,
+  signal: AbortSignal
+) {
+  const chosen = await chooseDestination(item.original_name)
+  if (!chosen || signal.aborted) return null
+
+  // The folder may have locked while the save dialog was open.
+  const key = unlockedKey
+  if (!key) throw new Error('Secure folder is locked')
+
+  let target = path.resolve(chosen)
+  const originalExt = path.extname(item.original_name || '')
+  if (!path.extname(target) && originalExt) target += originalExt
+  if (isInsideDir(target, VAULT_DIR()) || isInsideDir(target, CACHE_DIR())) {
+    throw new Error('Choose a folder outside Kino’s secure storage.')
+  }
+
+  const dir = path.dirname(target)
+  const encryptedSize = (await fs.promises.stat(item.encrypted_path)).size
+  await ensureFreeSpace(dir, encryptedSize - HEADER_LENGTH - TAG_LENGTH)
+
+  // Hidden, and not a video extension, so the library watcher ignores it until it's renamed.
+  const partialPath = path.join(dir, `.${path.basename(target)}.${crypto.randomBytes(4).toString('hex')}.partial`)
+  logSecure(`Restoring secure item ${item.id} to ${target}`)
+  try {
+    // GCM only confirms the data is intact once the last block is read; a failure there rejects this.
+    await decryptFile(item.encrypted_path, partialPath, key, { signal, exclusive: true })
+    await fs.promises.rename(partialPath, target)
+  } catch (err) {
+    await fs.promises.rm(partialPath, { force: true }).catch(() => undefined)
+    logSecure(`Restore failed for secure item ${item.id}`, err)
+    throw new Error(describeRestoreError(err, signal))
+  }
+
+  await removeFromVault(item)
+  logSecure(`Restored secure item ${item.id}`)
+  return { filePath: target, title: item.title as string }
+}
+
+/** Stop restores in progress and wait for their partial files to be removed. */
+export async function cancelSecureRestores() {
+  const tasks = [...restoresInFlight.values()]
+  for (const task of tasks) task.controller.abort()
+  await Promise.all(tasks.map(task => task.done))
+}
+
+function describeRestoreError(err: unknown, signal: AbortSignal) {
+  if (signal.aborted) return 'The restore was cancelled.'
+  const code = (err as NodeJS.ErrnoException)?.code
+  if (code === 'ENOSPC') return 'There isn’t enough free space in that folder.'
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'Kino can’t write to that folder.'
+  if (/authenticate/i.test((err as Error)?.message ?? '')) {
+    return 'The encrypted file is damaged, so it can’t be restored. It has been left in the Secure Folder.'
+  }
+  return (err as Error)?.message || 'Restore failed.'
+}
+
+async function ensureFreeSpace(dir: string, bytes: number) {
+  let available: number
+  try {
+    const stats = await fs.promises.statfs(dir)
+    available = Number(stats.bavail) * Number(stats.bsize)
+  } catch {
+    return // Can't tell; the write itself will fail cleanly if space runs out.
+  }
+  if (available < bytes + RESTORE_SPACE_MARGIN) {
+    throw new Error(`Not enough free space: the video needs ${formatBytes(bytes)} and ${formatBytes(available)} is available.`)
+  }
+}
+
+function formatBytes(bytes: number) {
+  const gb = bytes / 1024 ** 3
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.ceil(bytes / 1024 ** 2)} MB`
+}
+
+function isInsideDir(filePath: string, dir: string) {
+  const relative = path.relative(dir, filePath)
+  return relative === '' || (!path.isAbsolute(relative) && relative.split(path.sep)[0] !== '..')
 }
 
 const thumbnailCache = new Map<number, string>()

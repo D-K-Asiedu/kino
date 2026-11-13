@@ -180,6 +180,25 @@ export function pruneMoviesOutsideWatchPaths() {
     schedulePlaylistUpdate()
 }
 
+/**
+ * Add a video Kino just wrote (e.g. one restored from the Secure Folder) without waiting for the
+ * file watcher, which can miss files deeper than its depth limit. Returns false when the file is
+ * outside every library folder, so it won't appear in the library.
+ */
+export function addLibraryFile(filePath: string) {
+    if (!db.isInsideWatchPaths(filePath)) return false
+    if (!VIDEO_EXTENSIONS.includes(path.extname(filePath).toLowerCase())) return false
+    const existing = db.getMovieByPath(filePath)
+    if (existing) {
+        // The user chose to replace a file already in the library: refresh its thumbnail and details.
+        enqueueMetadataJob(existing.id, true)
+        scheduleLibraryUpdate()
+    } else {
+        handleFileAdd(filePath)
+    }
+    return true
+}
+
 export function triggerMetadataProcessing() {
     void processMetadataQueue()
 }

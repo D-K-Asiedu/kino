@@ -18,7 +18,7 @@ All secure content lives in Electron `app.getPath('userData')`:
 - Thumbnails (unchanged): `~/.config/kino/thumbnails/`
 - DB: `~/.config/kino/kino.db`
 - Log: `~/.config/kino/kino-debug.log`
-- Playback temp cache: `app.getPath('temp')/kino-secure-cache/`
+- Playback temp cache: `app.getPath('temp')/kino-secure-cache/<pid>/` (one folder per running Kino process)
 
 The vault never stores plaintext files at rest.
 
@@ -130,6 +130,22 @@ Current implementation decrypts to a temporary file:
 
 This means plaintext exists **only while playing**.
 
+### 7) Restore
+
+Path: `secure:restore-item` (unlocked only). Moves an item out of the vault as a normal file.
+
+1. The UI confirms, then main opens a save dialog (default: first library folder + `original_name`).
+   If the chosen name has no extension, the original one is added.
+2. Destinations inside `secure-vault` or `kino-secure-cache` are refused, and free space is checked with `statfs`.
+3. Decrypt into a hidden `.<name>.<random>.partial` file beside the target (exclusive create).
+   It isn't a video extension, so the library watcher ignores it.
+4. Only after decryption finishes (the GCM tag is verified at the end) is it renamed to the target.
+5. Then the blob, encrypted thumbnail, cached copies and `secure_items` row are removed.
+6. If the target is inside a library folder, it's added to the library straight away (`addLibraryFile`).
+
+Any failure, including a damaged blob, deletes the partial file and leaves the item in the vault.
+Restores in progress are cancelled, and their partial files removed, on reset and on quit.
+
 ## IPC Surface
 
 Registered in `electron/lib/ipc.ts`:
@@ -145,6 +161,7 @@ Registered in `electron/lib/ipc.ts`:
 - `secure:prepare-playback`
 - `secure:release-playback`
 - `secure:delete-item`
+- `secure:restore-item` -> `{ canceled }` or `{ canceled, filePath, inLibrary }`
 
 ## UI/UX
 
@@ -159,7 +176,7 @@ States:
 
 - First time: “Create Secure Password”
 - Locked: “Unlock Secure Folder”
-- Unlocked: grid of secure items and play/delete actions
+- Unlocked: grid of secure items and play/restore/delete actions
 
 Auto-lock behavior:
 
@@ -180,6 +197,11 @@ From `MovieCard` hover:
 - Files are encrypted at rest with authenticated encryption (AES-GCM).
 - Unlocking does **not** decrypt files on disk.
 - Playback does decrypt to a temporary plaintext file; it is deleted on close/lock.
+- The vault locks when the last window closes (macOS keeps the app running) and on quit.
+  Quitting also deletes this process's cache folder, after streams stop so ffmpeg has let go of the files.
+- At startup, cache folders of processes that are no longer running (crash, force-kill, power loss)
+  are deleted, along with loose files from older versions, and so are `kino-subs-<pid>` folders
+  holding subtitles extracted from secure videos. Folders of other running Kino copies are kept.
   - If you need zero plaintext on disk, this should be replaced by streaming decryption.
 
 ## Relevant Files
@@ -193,6 +215,5 @@ From `MovieCard` hover:
 ## Future Improvements
 
 - Stream-decrypt playback (no temp file).
-- “Restore to Library” action to export decrypted file to a chosen folder.
 - Password strength meter and visibility toggle.
 - Optional idle timeout auto-lock.

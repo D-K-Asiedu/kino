@@ -7,7 +7,8 @@ import { registerIPC } from './lib/ipc'
 import { startWatcher } from './lib/watcher'
 import { generateDefaultPlaylists } from './lib/playlists'
 import { handleStreamRequest, shutdownStreams, warmUpEncoders } from './lib/streaming'
-import { pruneSubtitleCache } from './lib/subtitles'
+import { pruneSubtitleCache, removeStalePrivateSubtitles } from './lib/subtitles'
+import { lockSecure, removeStaleSecureCache, shutdownSecure } from './lib/secure'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -132,13 +133,18 @@ app.on('before-quit', (event) => {
   // Hold the quit until ffmpeg has exited and the HLS temp folder is removed, but never for long.
   event.preventDefault()
   const timeout = new Promise(resolve => setTimeout(resolve, 3000))
-  void Promise.race([shutdownStreams(), timeout]).finally(() => {
+  // Streams go first so ffmpeg lets go of decrypted secure-folder files before they're deleted.
+  // Anything this misses (timeout, crash) is removed on the next launch.
+  const cleanup = shutdownStreams().catch(() => undefined).then(shutdownSecure)
+  void Promise.race([cleanup, timeout]).finally(() => {
     streamsShutDown = true
     app.quit()
   })
 })
 
 app.on('window-all-closed', () => {
+  // On macOS the app keeps running with no window, and the Secure Folder page never got to lock.
+  void lockSecure()
   if (process.platform !== 'darwin') {
     app.quit()
     win = null
@@ -153,6 +159,9 @@ app.on('activate', () => {
 
 app.whenReady().then(async () => {
   writeLog('INFO', 'App ready, starting initialization...')
+  // Decrypted secure-folder videos and their subtitles from runs that didn't quit cleanly.
+  void removeStaleSecureCache()
+  void removeStalePrivateSubtitles()
   
   try {
     // Register protocol handler

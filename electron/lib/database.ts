@@ -358,6 +358,10 @@ function isPathInside(filePath: string, dirPath: string) {
   return !path.isAbsolute(relative) && relative.split(path.sep)[0] !== '..'
 }
 
+export function isInsideWatchPaths(filePath: string) {
+  return (getWatchPaths() as { path: string }[]).some((row) => isPathInside(filePath, row.path))
+}
+
 export function removeMoviesOutsideWatchPaths() {
   const watchPaths = (getWatchPaths() as { path: string }[]).map((row) => row.path)
   const movies = cachedStmt('SELECT id, file_path FROM movies').all() as { id: number; file_path: string }[]

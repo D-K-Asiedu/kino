@@ -7,6 +7,7 @@ import { app } from 'electron'
 import type { FfprobeData, FfprobeStream } from 'fluent-ffmpeg'
 import { bundledFfmpegPath } from './encoders'
 import { probeMedia } from './media'
+import { isProcessAlive } from './processes'
 
 // Subtitles come from two places: tracks inside the video file, and subtitle files beside it.
 //
@@ -402,6 +403,17 @@ export async function removePrivateSubtitles() {
         if (dir.startsWith(root + path.sep)) servedDirs.delete(key)
     }
     await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined)
+}
+
+/** Remove subtitles extracted from secure-folder videos by Kino runs that didn't quit cleanly. */
+export async function removeStalePrivateSubtitles() {
+    const tmp = os.tmpdir()
+    const names = await fs.promises.readdir(tmp).catch(() => [] as string[])
+    await Promise.all(names.map(name => {
+        const owner = name.match(/^kino-subs-(\d+)$/)
+        if (!owner || Number(owner[1]) === process.pid || isProcessAlive(Number(owner[1]))) return
+        return fs.promises.rm(path.join(tmp, name), { recursive: true, force: true }).catch(() => undefined)
+    }))
 }
 
 // ---------------------------------------------------------------------------------------------
