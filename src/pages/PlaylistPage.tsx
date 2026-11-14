@@ -163,8 +163,8 @@ export function PlaylistPage() {
                     <h1 className="text-3xl font-semibold text-white tracking-tight truncate">{playlist.name}</h1>
                     <p className="text-textMuted mt-1">
                         {countActiveFilters(filters) > 0
-                            ? `${visibleMovies.length} of ${movies.length} ${movies.length === 1 ? 'movie' : 'movies'}`
-                            : `${movies.length} ${movies.length === 1 ? 'movie' : 'movies'}`}
+                            ? `${visibleMovies.length} of ${movies.length} ${movies.length === 1 ? 'video' : 'videos'}`
+                            : `${movies.length} ${movies.length === 1 ? 'video' : 'videos'}`}
                     </p>
                 </div>
                 <div className="flex items-center gap-3 flex-shrink-0">

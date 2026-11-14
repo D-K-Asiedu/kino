@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, ListPlus, Lock, Play, Plus, Trash2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, FolderOpen, ListPlus, Lock, Play, Plus, Trash2 } from 'lucide-react'
 import { Movie, Playlist } from '../types'
 import { useFeedback } from './Feedback'
 
@@ -166,6 +166,20 @@ export function MovieActionsMenu({ movie, anchor, onClose, onPlay, onRemoveFromP
                             Remove from playlist
                         </button>
                     )}
+                    <button
+                        role="menuitem"
+                        className={itemClass}
+                        onClick={() => {
+                            onClose()
+                            void window.ipcRenderer.invoke('shell:show-video-in-folder', movie.id).catch((err: unknown) => {
+                                console.error('Failed to show video in folder:', err)
+                                toast('Couldn’t open the folder', 'error')
+                            })
+                        }}
+                    >
+                        <FolderOpen className="w-4 h-4" />
+                        Show in folder
+                    </button>
                     <div className="my-1.5 h-px bg-white/5" />
                     <button role="menuitem" className={itemClass} onClick={() => { onClose(); onMoveToSecure() }}>
                         <Lock className="w-4 h-4" />

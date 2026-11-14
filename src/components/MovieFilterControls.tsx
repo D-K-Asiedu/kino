@@ -29,7 +29,7 @@ export function MovieFilterControls({ filters, onFiltersChange, sortBy, onSortCh
             <Dropdown
                 icon={SlidersHorizontal}
                 label={activeCount > 0 ? `Filters · ${activeCount}` : 'Filters'}
-                ariaLabel="Filter movies"
+                ariaLabel="Filter videos"
                 active={activeCount > 0}
                 closeOnSelect={false}
                 sections={[
@@ -50,7 +50,7 @@ export function MovieFilterControls({ filters, onFiltersChange, sortBy, onSortCh
             <Dropdown
                 icon={ArrowUpDown}
                 label={SORT_OPTIONS.find(o => o.value === sortBy)?.label ?? 'Sort'}
-                ariaLabel="Sort movies"
+                ariaLabel="Sort videos"
                 active={sortBy !== defaultSort}
                 sections={[{ options: SORT_OPTIONS, value: sortBy, onChange: onSortChange }]}
             />

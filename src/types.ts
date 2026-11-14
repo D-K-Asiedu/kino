@@ -12,6 +12,25 @@ export interface Movie {
     /** Saved playback position and length in seconds; null/absent when never watched. */
     progress?: number | null
     duration?: number | null
+    last_watched?: string | null
+    /** Set for TV episodes (worked out from file and folder names); null for movies. */
+    show_title?: string | null
+    season?: number | null
+    episode?: number | null
+    episode_title?: string | null
+}
+
+export interface Show {
+    title: string
+    episode_count: number
+    season_count: number
+    watched_count: number
+    poster_path: string | null
+    last_added: string
+    last_watched: string | null
+    /** What "Continue" plays; null once everything up to the latest episode is watched. */
+    next_up: Movie | null
+    next_up_resume: boolean
 }
 
 export interface Playlist {

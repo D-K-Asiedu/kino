@@ -6,6 +6,7 @@ import { MenuAnchor, MovieActionsMenu } from './MovieActionsMenu'
 import { MoveToSecureDialog } from './MoveToSecureDialog'
 import { useFeedback } from './Feedback'
 import { formatTimeLeft } from '../lib/format'
+import { episodeSubtitle } from '../lib/episodes'
 
 interface MovieCardProps {
     movie: Movie
@@ -15,9 +16,13 @@ interface MovieCardProps {
     /** When set, replaces the year/rating line with "42 min left". */
     remainingSeconds?: number
     onRemoveFromPlaylist?: () => void
+    /** Replaces the heading (e.g. the raw file name in the folder view). */
+    titleOverride?: string
+    /** Replaces the line under the heading. */
+    metaOverride?: React.ReactNode
 }
 
-export function MovieCard({ movie, onClick, progress, remainingSeconds, onRemoveFromPlaylist }: MovieCardProps) {
+export function MovieCard({ movie, onClick, progress, remainingSeconds, onRemoveFromPlaylist, titleOverride, metaOverride }: MovieCardProps) {
     const { toast } = useFeedback()
     const [menuAnchor, setMenuAnchor] = useState<MenuAnchor | null>(null)
     const [secureDialogOpen, setSecureDialogOpen] = useState(false)
@@ -120,11 +125,16 @@ export function MovieCard({ movie, onClick, progress, remainingSeconds, onRemove
 
                 {/* Title & meta below card */}
                 <div className="mt-3">
-                    <h3 className="font-medium text-text text-base line-clamp-2">{movie.title}</h3>
-                    <div className="flex items-center gap-2 text-textMuted text-xs mt-0.5 h-4">
+                    <h3 className="font-medium text-text text-base line-clamp-2 break-words" title={titleOverride}>
+                        {titleOverride ?? movie.show_title ?? movie.title}
+                    </h3>
+                    <div className="flex items-center gap-2 text-textMuted text-xs mt-0.5 h-4 min-w-0">
+                        {metaOverride !== undefined ? metaOverride : <>
+                        {movie.show_title && <span className="truncate">{episodeSubtitle(movie)}</span>}
+                        {movie.show_title && remainingSeconds !== undefined && <span className="text-white/20">•</span>}
                         {remainingSeconds !== undefined ? (
-                            <span>{formatTimeLeft(remainingSeconds)}</span>
-                        ) : (
+                            <span className="flex-none">{formatTimeLeft(remainingSeconds)}</span>
+                        ) : movie.show_title ? null : (
                             <>
                                 {movie.year && <span>{movie.year}</span>}
                                 {movie.year && movie.rating != null && <span className="text-white/20">•</span>}
@@ -136,6 +146,7 @@ export function MovieCard({ movie, onClick, progress, remainingSeconds, onRemove
                                 )}
                             </>
                         )}
+                        </>}
                     </div>
                 </div>
             </div>

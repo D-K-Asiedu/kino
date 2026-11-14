@@ -10,6 +10,7 @@ import JASSUB from 'jassub'
 // The enum isn't exported at runtime, only its type
 import type { PgsRendererMode } from 'libpgs/dist/pgsRendererMode'
 import { Movie, VideoElementWithTracks, AudioTrack } from '../types'
+import { episodeSubtitle } from '../lib/episodes'
 
 interface VideoPlayerProps {
     movie: Movie
@@ -1672,9 +1673,11 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                             <ChevronLeft className="w-8 h-8" />
                         </button>
                         <div>
-                            <h2 className="text-xl font-bold text-white drop-shadow-md">{movie.title}</h2>
+                            <h2 className="text-xl font-bold text-white drop-shadow-md">{movie.show_title ?? movie.title}</h2>
                             <div className="flex items-center gap-2 text-sm">
-                                {movie.year && <span className="text-white/60">{movie.year}</span>}
+                                {movie.show_title
+                                    ? <span className="text-white/60">{episodeSubtitle(movie)}</span>
+                                    : movie.year && <span className="text-white/60">{movie.year}</span>}
                                 {playbackInfo?.mode === 'transcode' && (
                                     <span
                                         className="px-1.5 py-0.5 rounded bg-white/10 text-white/60 text-[11px] font-medium"
@@ -1797,7 +1800,7 @@ export function VideoPlayer({ movie, onClose, onNext, onPrevious, hasNext, hasPr
                                     className="flex items-center justify-center gap-3 px-8 py-3.5 rounded-xl bg-white text-black hover:bg-white/90 transition-all font-bold text-sm tracking-wide hover:scale-105 active:scale-95 shadow-xl shadow-white/10"
                                 >
                                     <SkipForward className="w-4 h-4 fill-current" />
-                                    NEXT VIDEO
+                                    {movie.show_title ? 'NEXT EPISODE' : 'NEXT VIDEO'}
                                 </button>
                             )}
                             {hasPrevious && onPrevious && (

@@ -5,6 +5,7 @@ import * as db from './database'
 import { BrowserWindow, app } from 'electron'
 import { fetchMetadata } from './scraper'
 import { generateDefaultPlaylists } from './playlists'
+import { classifyLibrary, parseName } from './classify'
 
 let watcher: FSWatcher | null = null
 
@@ -65,6 +66,11 @@ export function startWatcher() {
 async function syncLibrary() {
     console.log('Watcher: Syncing library...')
     pruneMoviesOutsideWatchPaths()
+    // Classify before the one-off playlist clean-up, which needs to know what's an episode.
+    reclassifyLibrary()
+    if (db.removeEpisodeFolderPlaylists() > 0) {
+        notifyRenderer('playlists-updated')
+    }
     const movies = db.getMovies()
     const knownMoviePaths = new Set((movies as any[]).map((movie) => movie.file_path as string))
     const watchPaths = db.getWatchPaths().map((row: any) => row.path)
@@ -99,6 +105,8 @@ async function syncLibrary() {
 
             const entries = await fs.readdir(dir, { withFileTypes: true })
             for (const entry of entries) {
+                // Same rule as the live watcher: hidden folders like ".Trash-1000" aren't library content
+                if (entry.name.startsWith('.')) continue
                 const fullPath = path.join(dir, entry.name)
 
                 if (entry.isDirectory()) {
@@ -211,14 +219,15 @@ function handleFileAdd(filePath: string, options?: { skipExistsCheck?: boolean }
         return
     }
 
-    const filename = path.basename(filePath)
-    const parsed = parseFilename(filename)
+    // A first guess from the file name alone; reclassifyLibrary() refines it once the
+    // neighbouring files are known (which show, which season).
+    const parsed = parseName(path.parse(filePath).name)
 
     const stats = getFileStatSnapshot(filePath)
     const movie = {
-        title: parsed.title,
-        original_title: parsed.title, // Placeholder
-        year: parsed.year,
+        title: parsed.name || path.parse(filePath).name,
+        original_title: path.parse(filePath).name,
+        year: parsed.year ?? null,
         plot: '',
         poster_path: '',
         backdrop_path: '',
@@ -257,22 +266,16 @@ function handleFileRemove(filePath: string) {
     }
 }
 
-function parseFilename(filename: string) {
-    // Simple parser: "Movie.Name.2023.mkv" -> title: "Movie Name", year: 2023
-    const name = filename.replace(/\.[^/.]+$/, "") // remove extension
-
-    const yearMatch = name.match(/(19|20)\d{2}/)
-    let year = yearMatch ? parseInt(yearMatch[0]) : undefined
-
-    let title = name
-    if (yearMatch) {
-        title = name.substring(0, yearMatch.index).trim()
+/** Re-derives titles and show/season/episode for every video from file names and folders. */
+function reclassifyLibrary() {
+    try {
+        const files = db.getDB().prepare('SELECT id, file_path FROM movies').all() as { id: number; file_path: string }[]
+        const roots = (db.getWatchPaths() as { path: string }[]).map((row) => row.path)
+        const changed = db.applyClassifications(classifyLibrary(files, roots))
+        if (changed > 0) console.log(`Watcher: Updated titles and show details for ${changed} videos.`)
+    } catch (err) {
+        console.error('Watcher: Failed to classify library:', err)
     }
-
-    // Replace dots/underscores with spaces
-    title = title.replace(/[._]/g, ' ').trim()
-
-    return { title, year }
 }
 
 function notifyRenderer(channel: string, data?: any) {
@@ -292,6 +295,7 @@ function scheduleLibraryUpdate() {
         if (pendingLibraryUpdate) {
             pendingLibraryUpdate = false
         }
+        reclassifyLibrary()
         notifyRenderer('library-updated')
     }, 250)
 }
@@ -305,6 +309,7 @@ function schedulePlaylistUpdate() {
     if (playlistUpdateTimer) return
     playlistUpdateTimer = setTimeout(() => {
         playlistUpdateTimer = null
+        reclassifyLibrary()
         const result = generateDefaultPlaylists()
         if (result.created > 0 || result.added > 0) {
             console.log(`Watcher: Playlist sync generated ${result.created} playlists and added ${result.added} entries.`)

@@ -8,6 +8,7 @@ import { Settings } from './pages/Settings'
 import { PlaylistPage } from './pages/PlaylistPage'
 import { Playlists } from './pages/Playlists'
 import { SecureFolder } from './pages/SecureFolder'
+import { ShowPage } from './pages/ShowPage'
 
 function isTypingTarget(target: EventTarget | null) {
     if (!(target instanceof HTMLElement)) return false
@@ -45,6 +46,7 @@ function App() {
                         <Routes>
                             <Route path="/" element={<Home />} />
                             <Route path="/library" element={<Library />} />
+                            <Route path="/shows/:title" element={<ShowPage />} />
                             <Route path="/playlists" element={<Playlists />} />
                             <Route path="/playlists/:id" element={<PlaylistPage />} />
                             <Route path="/settings" element={<Settings />} />

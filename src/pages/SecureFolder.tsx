@@ -333,7 +333,7 @@ export function SecureFolder() {
                     {items.length === 0 ? (
                         <div className="mt-20 text-center text-textMuted">
                             <p className="text-sm">Nothing inside yet.</p>
-                            <p className="text-xs mt-1">Use the lock icon on a movie to move it here.</p>
+                            <p className="text-xs mt-1">Use the lock icon on a video to move it here.</p>
                         </div>
                     ) : (
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">

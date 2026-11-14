@@ -48,6 +48,9 @@ export function generateDefaultPlaylists() {
             // Skip if folder has only 1 movie (optional, but good for noise reduction)
             if (group.length < 2) continue
 
+            // A folder of episodes is a show (or a season of one) and is listed under Shows
+            if (group.every((movie) => movie.show_title)) continue
+
             // Skip if user has explicitly deleted this folder's playlist
             if (deletedFolders.has(folderName)) {
                 continue

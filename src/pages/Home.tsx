@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { MovieCard } from '../components/MovieCard'
 import { PlaylistCard } from '../components/PlaylistCard'
+import { ShowCard } from '../components/ShowCard'
 import { HorizontalScroller } from '../components/HorizontalScroller'
 import { VideoPlayer } from '../components/VideoPlayer'
 import { Poster } from '../components/Poster'
 import { HomeSkeleton } from '../components/Skeleton'
-import { Movie, Playlist } from '../types'
+import { Movie, Playlist, Show } from '../types'
 import { FolderPlus, Play, RotateCcw, Star } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useCoalescedIpcRefresh } from '../hooks/useCoalescedIpcRefresh'
 import { formatTimeLeft } from '../lib/format'
+import { episodeSubtitle, showPath } from '../lib/episodes'
 
 type WatchingMovie = Movie & { progress: number; duration: number; last_watched: string }
 type PlaylistWithMovies = Playlist & { movies: Movie[] }
@@ -17,6 +19,7 @@ type PlaylistWithMovies = Playlist & { movies: Movie[] }
 interface HomeData {
     continueWatching: WatchingMovie[]
     recentlyAdded: Movie[]
+    shows?: Show[]
     randomSuggestions: Movie[]
     lastWatchedPlaylist: PlaylistWithMovies | null
     recentlyWatchedPlaylists?: PlaylistWithMovies[]
@@ -113,6 +116,12 @@ export function Home() {
         setPlaylistContext(contextList || null)
         setStartMode(mode)
         setSelectedMovie(movie)
+        // An episode's next/previous are the show's other episodes, whichever row it came from.
+        if (movie.show_title) {
+            void window.ipcRenderer.invoke('db:get-show-episodes', movie.show_title)
+                .then((episodes) => setPlaylistContext(episodes as Movie[]))
+                .catch((err: unknown) => console.error('Failed to load episodes:', err))
+        }
     }
 
     const handleNext = () => {
@@ -141,7 +150,8 @@ export function Home() {
     const moreContinueWatching = data.continueWatching.slice(1)
     const recentlyAdded = heroWatching ? data.recentlyAdded : data.recentlyAdded.slice(1)
 
-    const isEmpty = !heroMovie && playlists.length === 0 && data.randomSuggestions.length === 0
+    const shows = data.shows ?? []
+    const isEmpty = !heroMovie && shows.length === 0 && playlists.length === 0 && data.randomSuggestions.length === 0
 
     return (
         <>
@@ -182,7 +192,7 @@ export function Home() {
                                     <MovieCard
                                         movie={movie}
                                         progress={movie.duration > 0 ? movie.progress / movie.duration : 0}
-                                        remainingSeconds={movie.duration > 0 ? movie.duration - movie.progress : undefined}
+                                        remainingSeconds={movie.duration > 0 && movie.progress > 5 ? movie.duration - movie.progress : undefined}
                                         onClick={() => handlePlayMovie(movie, undefined, 'resume')}
                                     />
                                 </div>
@@ -201,6 +211,27 @@ export function Home() {
                                         movie={movie}
                                         onClick={() => handlePlayMovie(movie, recentlyAdded)}
                                     />
+                                </div>
+                            ))}
+                        </HorizontalScroller>
+                    </section>
+                )}
+
+                {shows.length > 0 && (
+                    <section>
+                        <SectionHeading
+                            action={
+                                <Link to="/library?view=shows" className="text-sm text-textMuted hover:text-white transition-colors">
+                                    See all
+                                </Link>
+                            }
+                        >
+                            Shows
+                        </SectionHeading>
+                        <HorizontalScroller>
+                            {shows.map(show => (
+                                <div key={show.title} className="w-[300px] snap-start flex-none">
+                                    <ShowCard show={show} onClick={() => navigate(showPath(show.title))} />
                                 </div>
                             ))}
                         </HorizontalScroller>
@@ -267,10 +298,12 @@ function HomeHero({ movie, watching, onPlay }: {
     watching?: WatchingMovie
     onPlay: (mode: StartMode) => void
 }) {
-    const fraction = watching && watching.duration > 0 ? Math.min(1, watching.progress / watching.duration) : 0
+    // A show's next episode can be on Continue Watching before it has been started.
+    const started = !!watching && watching.progress > 5
+    const fraction = started && watching.duration > 0 ? Math.min(1, watching.progress / watching.duration) : 0
     const meta = [
-        movie.year ? String(movie.year) : null,
-        watching && watching.duration > 0 ? formatTimeLeft(watching.duration - watching.progress) : null,
+        movie.show_title ? episodeSubtitle(movie) : movie.year ? String(movie.year) : null,
+        started && watching.duration > 0 ? formatTimeLeft(watching.duration - watching.progress) : null,
     ].filter(Boolean) as string[]
 
     return (
@@ -286,10 +319,10 @@ function HomeHero({ movie, watching, onPlay }: {
 
             <div className="relative h-full flex flex-col justify-end p-8 md:p-10 max-w-2xl">
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-primary">
-                    {watching ? 'Continue watching' : 'New in your library'}
+                    {started ? 'Continue watching' : watching ? 'Up next' : 'New in your library'}
                 </p>
                 <h1 className="mt-3 text-4xl md:text-5xl font-semibold tracking-tight text-white line-clamp-2 drop-shadow-lg">
-                    {movie.title}
+                    {movie.show_title ?? movie.title}
                 </h1>
 
                 <div className="mt-3 flex items-center gap-3 text-sm text-white/70">
@@ -314,7 +347,7 @@ function HomeHero({ movie, watching, onPlay }: {
                     <p className="mt-3 text-white/60 line-clamp-2 max-w-xl">{movie.plot}</p>
                 )}
 
-                {watching && (
+                {started && (
                     <div className="mt-5 w-72 max-w-full h-1 rounded-full bg-white/15 overflow-hidden">
                         <div className="h-full bg-primary" style={{ width: `${fraction * 100}%` }} />
                     </div>
@@ -322,13 +355,13 @@ function HomeHero({ movie, watching, onPlay }: {
 
                 <div className="mt-6 flex items-center gap-3">
                     <button
-                        onClick={() => onPlay(watching ? 'resume' : 'prompt')}
+                        onClick={() => onPlay(started ? 'resume' : 'prompt')}
                         className="flex items-center gap-2.5 px-6 py-3 rounded-xl bg-white text-black font-semibold hover:bg-white/90 active:scale-[0.98] transition-all shadow-xl shadow-black/30"
                     >
                         <Play className="w-4 h-4 fill-current" />
-                        {watching ? 'Resume' : 'Play'}
+                        {started ? 'Resume' : 'Play'}
                     </button>
-                    {watching && (
+                    {started && (
                         <button
                             onClick={() => onPlay('restart')}
                             className="flex items-center gap-2 px-5 py-3 rounded-xl bg-white/10 hover:bg-white/15 text-white font-medium backdrop-blur-md border border-white/10 transition-colors"

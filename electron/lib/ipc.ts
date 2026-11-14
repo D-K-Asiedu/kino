@@ -1,4 +1,4 @@
-import { ipcMain, dialog, app } from 'electron'
+import { ipcMain, dialog, app, shell } from 'electron'
 import * as db from './database'
 import path from 'path'
 import { updateWatcher, triggerMetadataProcessing, pruneMoviesOutsideWatchPaths, addLibraryFile } from './watcher'
@@ -39,6 +39,16 @@ export function registerIPC() {
     ipcMain.handle('settings:get', (_, key) => db.getSetting(key))
     ipcMain.handle('settings:set', (_, key, value) => db.setSetting(key, value))
     ipcMain.handle('db:get-home-data', () => db.getHomeData())
+    ipcMain.handle('db:get-shows', () => db.getShows())
+    ipcMain.handle('db:get-folder', (_, folderPath: string | null) => db.getFolderContents(folderPath))
+    // Takes a library video's id rather than a path, so the renderer can only reveal library files.
+    ipcMain.handle('shell:show-video-in-folder', (_, movieId: number) => {
+        const movie = db.getMovieById(Number(movieId))
+        if (!movie?.file_path) return false
+        shell.showItemInFolder(movie.file_path)
+        return true
+    })
+    ipcMain.handle('db:get-show-episodes', (_, showTitle: string) => db.getShowEpisodes(String(showTitle)))
 
     // Playlist handlers
     ipcMain.handle('db:create-playlist', (_, name) => {

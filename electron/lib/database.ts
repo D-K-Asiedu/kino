@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3'
 import path from 'path'
 import { app } from 'electron'
+import type { Classification } from './classify'
+import { pickNextUp, sortEpisodes, watchedFraction, WATCHED_FRACTION } from '../../src/lib/episodes'
 
 // Defer database initialization until app is ready
 let db: Database.Database | null = null
@@ -130,12 +132,26 @@ function ensureMovieColumns() {
   if (!names.has('file_size')) {
     getDB().exec('ALTER TABLE movies ADD COLUMN file_size INTEGER')
   }
+  // Filled in by classify.ts; show_title is null for movies.
+  if (!names.has('show_title')) {
+    getDB().exec('ALTER TABLE movies ADD COLUMN show_title TEXT')
+  }
+  if (!names.has('season')) {
+    getDB().exec('ALTER TABLE movies ADD COLUMN season INTEGER')
+  }
+  if (!names.has('episode')) {
+    getDB().exec('ALTER TABLE movies ADD COLUMN episode INTEGER')
+  }
+  if (!names.has('episode_title')) {
+    getDB().exec('ALTER TABLE movies ADD COLUMN episode_title TEXT')
+  }
 }
 
 function ensureIndexes() {
   getDB().exec(`
     CREATE INDEX IF NOT EXISTS idx_movies_added_at ON movies (added_at DESC);
     CREATE INDEX IF NOT EXISTS idx_movies_title_nocase ON movies (title COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS idx_movies_show_title ON movies (show_title);
     CREATE INDEX IF NOT EXISTS idx_playlists_created_at ON playlists (created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_playlists_last_watched ON playlists (last_watched DESC);
     CREATE INDEX IF NOT EXISTS idx_playlist_movies_movie_id ON playlist_movies (movie_id);
@@ -150,6 +166,8 @@ export function getMovies() {
 }
 
 interface LibraryPageQuery {
+  /** 'videos' leaves out TV episodes, which the Shows view lists instead. */
+  kind?: 'videos' | 'all'
   searchQuery?: string
   filterBy?: string
   rating?: string
@@ -168,6 +186,10 @@ export function getLibraryPage(query?: LibraryPageQuery) {
 
   const whereClauses: string[] = []
   const whereArgs: Array<string | number> = []
+
+  if (query?.kind === 'videos') {
+    whereClauses.push('show_title IS NULL')
+  }
 
   if (searchQuery) {
     whereClauses.push('LOWER(title) LIKE ?')
@@ -324,13 +346,12 @@ export function removeSetting(key: string) {
   return stmt.run(key)
 }
 
+// Title, year and show fields are owned by applyClassifications, so a metadata job that started
+// before a re-classification can't write a stale title back.
 export function updateMovie(id: number | bigint, movie: any) {
   const stmt = cachedStmt(`
     UPDATE movies
-    SET title = @title,
-        original_title = @original_title,
-        year = @year,
-        plot = @plot,
+    SET plot = @plot,
         poster_path = @poster_path,
         backdrop_path = @backdrop_path,
         rating = @rating,
@@ -358,14 +379,20 @@ function isPathInside(filePath: string, dirPath: string) {
   return !path.isAbsolute(relative) && relative.split(path.sep)[0] !== '..'
 }
 
+// Hidden folders inside a library folder (".Trash-1000", ".snapshots") aren't part of the library.
+function isInsideLibraryFolder(filePath: string, dirPath: string) {
+  if (!isPathInside(filePath, dirPath)) return false
+  return !path.relative(dirPath, filePath).split(path.sep).some((segment) => segment.startsWith('.'))
+}
+
 export function isInsideWatchPaths(filePath: string) {
-  return (getWatchPaths() as { path: string }[]).some((row) => isPathInside(filePath, row.path))
+  return (getWatchPaths() as { path: string }[]).some((row) => isInsideLibraryFolder(filePath, row.path))
 }
 
 export function removeMoviesOutsideWatchPaths() {
   const watchPaths = (getWatchPaths() as { path: string }[]).map((row) => row.path)
   const movies = cachedStmt('SELECT id, file_path FROM movies').all() as { id: number; file_path: string }[]
-  const orphaned = movies.filter((movie) => !watchPaths.some((watchPath) => isPathInside(movie.file_path, watchPath)))
+  const orphaned = movies.filter((movie) => !watchPaths.some((watchPath) => isInsideLibraryFolder(movie.file_path, watchPath)))
   if (orphaned.length === 0) return orphaned
 
   const remove = cachedStmt('DELETE FROM movies WHERE id = ?')
@@ -580,10 +607,10 @@ const MOVIE_WITH_PROGRESS_SQL = `
 
 function getRotatingSlice(table: 'movies' | 'playlists', limit: number) {
   const countSql = table === 'movies'
-    ? 'SELECT COUNT(*) as count FROM movies'
+    ? 'SELECT COUNT(*) as count FROM movies WHERE show_title IS NULL'
     : 'SELECT COUNT(*) as count FROM playlists'
   const listSql = table === 'movies'
-    ? `${MOVIE_WITH_PROGRESS_SQL} ORDER BY m.id ASC LIMIT ? OFFSET ?`
+    ? `${MOVIE_WITH_PROGRESS_SQL} WHERE m.show_title IS NULL ORDER BY m.id ASC LIMIT ? OFFSET ?`
     : 'SELECT * FROM playlists ORDER BY id ASC LIMIT ? OFFSET ?'
 
   const total = (cachedStmt(countSql).get() as { count: number } | undefined)?.count ?? 0
@@ -597,7 +624,7 @@ function getRotatingSlice(table: 'movies' | 'playlists', limit: number) {
 
   const remaining = limit - primary.length
   const wrap = cachedStmt(table === 'movies'
-    ? `${MOVIE_WITH_PROGRESS_SQL} ORDER BY m.id ASC LIMIT ?`
+    ? `${MOVIE_WITH_PROGRESS_SQL} WHERE m.show_title IS NULL ORDER BY m.id ASC LIMIT ?`
     : 'SELECT * FROM playlists ORDER BY id ASC LIMIT ?').all(remaining) as any[]
   return primary.concat(wrap)
 }
@@ -675,19 +702,17 @@ export function getPlaylistsOverview() {
 
 // Home Page Data
 export function getHomeData() {
-  const continueWatching = cachedStmt(`
-    SELECT m.*, p.progress, p.duration, p.last_watched 
-    FROM movies m 
-    JOIN playback_progress p ON m.id = p.movie_id 
-    ORDER BY p.last_watched DESC 
-    LIMIT 10
-  `).all()
+  const continueWatching = getContinueWatching(10)
 
+  // Episodes have their own "Shows" row, so a new season doesn't flood this one.
   const recentlyAdded = cachedStmt(`
     ${MOVIE_WITH_PROGRESS_SQL}
+    WHERE m.show_title IS NULL
     ORDER BY m.added_at DESC
     LIMIT 10
   `).all()
+
+  const shows = getShows().slice(0, 12)
 
   const randomSuggestions = getRotatingSlice('movies', 6)
 
@@ -731,11 +756,244 @@ export function getHomeData() {
   return {
     continueWatching,
     recentlyAdded,
+    shows,
     randomSuggestions,
     lastWatchedPlaylist,
     recentlyWatchedPlaylists: withPlaylistPreviewMovies(recentlyWatchedPlaylists, previewMap),
     latestPlaylists: withPlaylistPreviewMovies(latestPlaylists, previewMap),
     recommendedPlaylists: withPlaylistPreviewMovies(recommendedPlaylists, previewMap)
+  }
+}
+
+// ---- Shows -------------------------------------------------------------------------------
+
+/** Writes classify.ts results, touching only rows whose title or show fields changed. */
+export function applyClassifications(classifications: Map<number, Classification>) {
+  const rows = cachedStmt('SELECT id, title, year, show_title, season, episode, episode_title FROM movies').all() as any[]
+  const update = cachedStmt(`
+    UPDATE movies
+    SET title = @title, year = @year, show_title = @show_title, season = @season,
+        episode = @episode, episode_title = @episode_title
+    WHERE id = @id
+  `)
+  let changed = 0
+  getDB().transaction(() => {
+    for (const row of rows) {
+      const next = classifications.get(row.id)
+      if (!next) continue
+      if (
+        row.title === next.title && row.year === next.year && row.show_title === next.show_title &&
+        row.season === next.season && row.episode === next.episode && row.episode_title === next.episode_title
+      ) continue
+      update.run({ id: row.id, ...next })
+      changed++
+    }
+  })()
+  return changed
+}
+
+const EPISODE_SQL = `
+  SELECT m.*, p.progress, p.duration, p.last_watched
+  FROM movies m
+  LEFT JOIN playback_progress p ON p.movie_id = m.id
+  WHERE m.show_title IS NOT NULL
+`
+
+export interface ShowSummary {
+  title: string
+  episode_count: number
+  season_count: number
+  watched_count: number
+  poster_path: string | null
+  last_added: string
+  last_watched: string | null
+  /** What "Continue" plays; null once everything up to the latest episode is watched. */
+  next_up: any | null
+  next_up_resume: boolean
+}
+
+export function getShows(): ShowSummary[] {
+  const rows = cachedStmt(EPISODE_SQL).all() as any[]
+  const byShow = new Map<string, any[]>()
+  for (const row of rows) {
+    const list = byShow.get(row.show_title)
+    if (list) list.push(row)
+    else byShow.set(row.show_title, [row])
+  }
+
+  const shows: ShowSummary[] = []
+  for (const [title, unsorted] of byShow) {
+    const episodes = sortEpisodes(unsorted)
+    const nextUp = pickNextUp(episodes)
+    const seasons = new Set(episodes.map((ep) => ep.season).filter((season) => season !== null))
+    let lastAdded = ''
+    let lastWatched: string | null = null
+    for (const ep of episodes) {
+      if (ep.added_at > lastAdded) lastAdded = ep.added_at
+      if (ep.last_watched && (!lastWatched || ep.last_watched > lastWatched)) lastWatched = ep.last_watched
+    }
+    shows.push({
+      title,
+      episode_count: episodes.length,
+      season_count: seasons.size,
+      watched_count: episodes.filter((ep) => watchedFraction(ep) >= WATCHED_FRACTION).length,
+      // The first episode's frame stands in for a poster until real artwork exists.
+      poster_path: episodes.find((ep) => ep.poster_path)?.poster_path ?? null,
+      last_added: lastAdded,
+      last_watched: lastWatched,
+      next_up: nextUp?.episode ?? null,
+      next_up_resume: nextUp?.resume ?? false,
+    })
+  }
+
+  // Shows being watched first, then the newest additions.
+  return shows.sort((a, b) =>
+    (b.last_watched ?? '').localeCompare(a.last_watched ?? '') || b.last_added.localeCompare(a.last_added)
+  )
+}
+
+export function getShowEpisodes(showTitle: string) {
+  return sortEpisodes(cachedStmt(`${EPISODE_SQL} AND m.show_title = ?`).all(showTitle) as any[])
+}
+
+/**
+ * Recently watched movies plus one entry per show. For a show that's the episode to watch
+ * next, so finishing S2 E5 puts S2 E6 here instead of the finished episode.
+ */
+function getContinueWatching(limit: number) {
+  const recent = cachedStmt(`
+    SELECT m.*, p.progress, p.duration, p.last_watched
+    FROM movies m
+    JOIN playback_progress p ON m.id = p.movie_id
+    ORDER BY p.last_watched DESC
+    LIMIT 200
+  `).all() as any[]
+
+  const items: any[] = []
+  const seenShows = new Set<string>()
+  for (const row of recent) {
+    if (items.length >= limit) break
+    if (!row.show_title) {
+      items.push(row)
+      continue
+    }
+    if (seenShows.has(row.show_title)) continue
+    seenShows.add(row.show_title)
+    const next = pickNextUp(getShowEpisodes(row.show_title))
+    if (!next) continue // caught up
+    // Sort position stays that of the show's last watch.
+    items.push({ ...next.episode, last_watched: row.last_watched })
+  }
+  return items
+}
+
+/**
+ * One-off clean-up for libraries from before shows existed: drops the playlists that were
+ * generated from season folders ("s1", "Season4Part1"), since those episodes now live under
+ * Shows. Only playlists named after the folder of every video in them, all of them episodes,
+ * are removed, so playlists people made themselves stay.
+ */
+export function removeEpisodeFolderPlaylists() {
+  const MIGRATION_KEY = 'migration_episode_folder_playlists_removed'
+  if (getSetting(MIGRATION_KEY)) return 0
+
+  const rows = cachedStmt(`
+    SELECT pl.id, pl.name, m.file_path, m.show_title
+    FROM playlists pl
+    JOIN playlist_movies pm ON pm.playlist_id = pl.id
+    JOIN movies m ON m.id = pm.movie_id
+  `).all() as { id: number; name: string; file_path: string; show_title: string | null }[]
+
+  const verdict = new Map<number, boolean>()
+  for (const row of rows) {
+    const fromFolder = path.basename(path.dirname(row.file_path)) === row.name && row.show_title !== null
+    verdict.set(row.id, (verdict.get(row.id) ?? true) && fromFolder)
+  }
+  const toDelete = [...verdict].filter(([, remove]) => remove).map(([id]) => id)
+
+  getDB().transaction(() => {
+    for (const id of toDelete) deletePlaylist(id)
+    setSetting(MIGRATION_KEY, new Date().toISOString())
+  })()
+  if (toDelete.length > 0) console.log(`Database: Removed ${toDelete.length} season-folder playlists now covered by Shows`)
+  return toDelete.length
+}
+
+// ---- Folders -----------------------------------------------------------------------------
+
+const fileNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+export interface FolderSummary {
+  path: string
+  name: string
+  video_count: number
+  /** Thumbnails of the first few videos inside, in name order, for the card collage. */
+  previews: string[]
+}
+
+/**
+ * One folder of the library as it is on disk: its subfolders (that contain videos) and the
+ * videos directly inside it. Built from the indexed videos, so hidden folders and non-video
+ * files never appear. Without a path (or with one outside the library folders) it lists the
+ * library folders themselves, or opens the only one there is.
+ */
+export function getFolderContents(requestedPath?: string | null) {
+  const roots = (getWatchPaths() as { path: string }[]).map((row) => path.resolve(row.path))
+  const rows = (cachedStmt(MOVIE_WITH_PROGRESS_SQL).all() as any[])
+    .sort((a, b) => fileNameCollator.compare(a.file_path, b.file_path))
+
+  const requested = requestedPath ? path.resolve(requestedPath) : null
+  let current = requested && roots.some((root) => isPathInside(requested, root)) ? requested : null
+  if (!current && roots.length === 1) current = roots[0]
+
+  const summarize = (dir: string, name: string, inside: any[]): FolderSummary => ({
+    path: dir,
+    name,
+    video_count: inside.length,
+    previews: inside.filter((row) => row.poster_path).slice(0, 4).map((row) => row.poster_path as string),
+  })
+
+  if (!current) {
+    return {
+      path: null,
+      breadcrumbs: [] as { name: string; path: string | null }[],
+      folders: roots.map((root) => summarize(root, root, rows.filter((row) => isPathInside(row.file_path, root)))),
+      videos: [] as any[],
+    }
+  }
+
+  const children = new Map<string, any[]>()
+  const videos: any[] = []
+  for (const row of rows) {
+    if (!isPathInside(row.file_path, current)) continue
+    const [first, ...restParts] = path.relative(current, row.file_path).split(path.sep)
+    if (restParts.length === 0) {
+      videos.push({ ...row, file_name: first })
+    } else {
+      const childPath = path.join(current, first)
+      const list = children.get(childPath)
+      if (list) list.push(row)
+      else children.set(childPath, [row])
+    }
+  }
+
+  const root = roots
+    .filter((candidate) => isPathInside(current!, candidate))
+    .sort((a, b) => b.length - a.length)[0]
+  const breadcrumbs: { name: string; path: string | null }[] = []
+  if (roots.length > 1) breadcrumbs.push({ name: 'Library folders', path: null })
+  breadcrumbs.push({ name: path.basename(root) || root, path: root })
+  let walked = root
+  for (const part of path.relative(root, current).split(path.sep).filter(Boolean)) {
+    walked = path.join(walked, part)
+    breadcrumbs.push({ name: part, path: walked })
+  }
+
+  return {
+    path: current,
+    breadcrumbs,
+    folders: [...children].map(([dir, inside]) => summarize(dir, path.basename(dir), inside)),
+    videos,
   }
 }
 
