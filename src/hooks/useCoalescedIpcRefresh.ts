@@ -22,6 +22,9 @@ export function useCoalescedIpcRefresh(
     }, [task])
 
     useEffect(() => {
+        // Set on mount, not only in useRef: StrictMode unmounts and remounts in development, and
+        // without this the hook stays "unmounted" and ignores every refresh event.
+        mountedRef.current = true
         return () => {
             mountedRef.current = false
             if (timerRef.current !== null) {
